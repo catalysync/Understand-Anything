@@ -36,6 +36,7 @@ const KeyboardShortcutsHelp = lazy(
   () => import("./components/KeyboardShortcutsHelp"),
 );
 const OnboardingOverlay = lazy(() => import("./components/OnboardingOverlay"));
+const SymbolPalette = lazy(() => import("./components/SymbolPalette"));
 
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
 const SESSION_TOKEN_KEY = "understand-anything-token";
@@ -305,7 +306,9 @@ function DashboardContent({
         action: () => {
           // Read from store at invocation time to avoid stale closures
           const state = useDashboardStore.getState();
-          if (state.pathFinderOpen) {
+          if (state.symbolPaletteOpen) {
+            state.setSymbolPaletteOpen(false);
+          } else if (state.pathFinderOpen) {
             state.togglePathFinder();
           } else if (state.filterPanelOpen) {
             state.toggleFilterPanel();
@@ -397,6 +400,28 @@ function DashboardContent({
           state.togglePathFinder();
         },
         category: "View",
+      },
+      // Wave-2 feature 20: fuzzy symbol palette (⌘K / Ctrl+K and ⌘P / Ctrl+P).
+      {
+        key: "k",
+        metaKey: true,
+        description: "Open symbol palette",
+        action: () => useDashboardStore.getState().toggleSymbolPalette(),
+        category: "Navigation",
+      },
+      {
+        key: "k",
+        ctrlKey: true,
+        description: "Open symbol palette",
+        action: () => useDashboardStore.getState().toggleSymbolPalette(),
+        category: "Navigation",
+      },
+      {
+        key: "p",
+        metaKey: true,
+        description: "Open symbol palette",
+        action: () => useDashboardStore.getState().toggleSymbolPalette(),
+        category: "Navigation",
       },
     ],
     [t]
@@ -608,6 +633,15 @@ function DashboardContent({
           <FilterPanel />
           <ExportMenu />
           <button
+            onClick={() => useDashboardStore.getState().toggleSymbolPalette()}
+            className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg text-sm bg-elevated text-text-secondary hover:text-text-primary transition-colors"
+            title="Symbol palette (⌘K)"
+            data-testid="open-symbol-palette"
+          >
+            <span className="font-mono text-xs">⌘K</span>
+            <span className="hidden md:inline">Symbols</span>
+          </button>
+          <button
             onClick={togglePathFinder}
             className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg text-sm bg-elevated text-text-secondary hover:text-text-primary transition-colors"
             title={t.pathFinder.title}
@@ -747,6 +781,12 @@ function DashboardContent({
           <OnboardingOverlay onDismiss={dismissOnboarding} />
         </Suspense>
       )}
+
+      {/* Wave-2 feature 20: fuzzy symbol palette (⌘K / ⌘P). Always mounted so the
+          shortcut can open it; it self-hides when closed. */}
+      <Suspense fallback={null}>
+        <SymbolPalette />
+      </Suspense>
     </div>
   );
 }

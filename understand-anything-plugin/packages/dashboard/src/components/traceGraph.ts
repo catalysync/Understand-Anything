@@ -252,6 +252,268 @@ export function matchesFoldPattern(name: string, patterns: string[]): boolean {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Wave-2 code-intelligence helpers (references, implementations, signatures,
+// containment breadcrumb, concurrency detection, fuzzy symbol search).
+// ---------------------------------------------------------------------------
+
+export interface Reference {
+  node: GraphNode;
+  /** Why this is a reference: a direct call or an import of the defining file. */
+  kind: "calls" | "imports";
+}
+
+/**
+ * All references to a node: incoming `calls` (callers) plus incoming `imports`
+ * that target the node OR the file that contains the node. Grouped/dedup by id,
+ * preferring "calls" when a node both calls and imports.
+ */
+export function referencesOf(graph: KnowledgeGraph, id: string): Reference[] {
+  const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
+  const node = nodesById.get(id);
+  // The file node that contains this node (so import-of-file counts as a ref).
+  const fileId = graph.edges.find((e) => e.type === "contains" && e.target === id)?.source;
+  const byId = new Map<string, Reference>();
+  for (const e of graph.edges) {
+    let isRef = false;
+    let kind: "calls" | "imports" = "calls";
+    if (e.type === "calls" && e.target === id) {
+      isRef = true;
+      kind = "calls";
+    } else if (e.type === "imports" && (e.target === id || (fileId && e.target === fileId))) {
+      isRef = true;
+      kind = "imports";
+    }
+    if (!isRef) continue;
+    const src = nodesById.get(e.source);
+    if (!src || src.id === id || src.id === node?.id) continue;
+    const existing = byId.get(src.id);
+    // Prefer "calls" over "imports" for the same source.
+    if (!existing || (existing.kind === "imports" && kind === "calls")) {
+      byId.set(src.id, { node: src, kind });
+    }
+  }
+  return [...byId.values()];
+}
+
+/** Group references by the file they live in (filePath). */
+export function groupReferencesByFile(refs: Reference[]): { file: string; refs: Reference[] }[] {
+  const byFile = new Map<string, Reference[]>();
+  for (const r of refs) {
+    const file = r.node.filePath ?? "(unknown)";
+    let list = byFile.get(file);
+    if (!list) {
+      list = [];
+      byFile.set(file, list);
+    }
+    list.push(r);
+  }
+  return [...byFile.entries()]
+    .map(([file, list]) => ({ file, refs: list }))
+    .sort((a, b) => a.file.localeCompare(b.file));
+}
+
+/**
+ * Concrete implementations of an interface node: sources of `implements` edges
+ * whose target is `id`. Returns [] if the node has no implementors.
+ */
+export function implementationsOf(graph: KnowledgeGraph, id: string): GraphNode[] {
+  const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
+  return graph.edges
+    .filter((e) => e.type === "implements" && e.target === id)
+    .map((e) => nodesById.get(e.source))
+    .filter((n): n is GraphNode => n !== undefined);
+}
+
+/**
+ * Interfaces a node implements: targets of `implements` edges whose source is
+ * `id`. Returns [] if the node implements nothing.
+ */
+export function interfacesOf(graph: KnowledgeGraph, id: string): GraphNode[] {
+  const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
+  return graph.edges
+    .filter((e) => e.type === "implements" && e.source === id)
+    .map((e) => nodesById.get(e.target))
+    .filter((n): n is GraphNode => n !== undefined);
+}
+
+/** Number of incoming `calls` edges (a cheap "popularity"/ref-count). */
+export function callCountOf(graph: KnowledgeGraph, id: string): number {
+  let n = 0;
+  for (const e of graph.edges) if (e.type === "calls" && e.target === id) n++;
+  return n;
+}
+
+/**
+ * Pull the one-line "signature" of a node from full file source: the first
+ * non-blank, non-comment line at/after the node's lineRange start. Pragmatic —
+ * for Go this is the `func`/`type` declaration line. Returns null if we can't.
+ */
+export function signatureFromSource(
+  fullSource: string | undefined,
+  node: GraphNode | undefined,
+): string | null {
+  if (!fullSource || !node?.lineRange) return null;
+  const lines = fullSource.split("\n");
+  const start = Math.max(0, node.lineRange[0] - 1);
+  const end = Math.min(lines.length, node.lineRange[1]);
+  for (let i = start; i < end; i++) {
+    const raw = lines[i];
+    if (raw === undefined) continue;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) continue;
+    // Trim a trailing opening brace for compactness.
+    return trimmed.replace(/\s*\{\s*$/, "");
+  }
+  return null;
+}
+
+/** Containment breadcrumb for a hop header: pkg › file › name. */
+export function containmentBreadcrumb(node: GraphNode | undefined): {
+  pkg: string;
+  file: string;
+  name: string;
+} {
+  if (!node) return { pkg: "—", file: "—", name: "—" };
+  const path = node.filePath ?? "";
+  const slash = path.lastIndexOf("/");
+  const file = slash >= 0 ? path.slice(slash + 1) : path || "—";
+  const pkg = slash > 0 ? packageLabel(path.slice(0, slash)) : "(root)";
+  return { pkg, file: file || "—", name: node.name };
+}
+
+export interface ConcurrencyInfo {
+  /** True if any concurrency marker was detected in the source slice. */
+  detected: boolean;
+  /** Distinct markers found (for the badge tooltip). */
+  markers: string[];
+}
+
+/** Heuristic Go-concurrency markers we scan a source slice for. */
+const CONCURRENCY_MARKERS: { re: RegExp; label: string }[] = [
+  { re: /(^|\W)go\s+\w[\w.]*\s*\(/, label: "go " },
+  { re: /(^|\W)go\s+func\s*\(/, label: "go func()" },
+  { re: /<-/, label: "<- channel" },
+  { re: /\bchan\b/, label: "chan" },
+  { re: /\bselect\s*\{/, label: "select{}" },
+  { re: /sync\.WaitGroup/, label: "sync.WaitGroup" },
+  { re: /sync\.Mutex|sync\.RWMutex/, label: "sync.Mutex" },
+  { re: /\.Lock\(\)|\.Unlock\(\)/, label: "Lock/Unlock" },
+];
+
+/** Detect Go concurrency in a source slice (the hop's lineRange window). */
+export function detectConcurrency(sourceSlice: string | undefined | null): ConcurrencyInfo {
+  if (!sourceSlice) return { detected: false, markers: [] };
+  const markers: string[] = [];
+  for (const m of CONCURRENCY_MARKERS) {
+    if (m.re.test(sourceSlice) && !markers.includes(m.label)) markers.push(m.label);
+  }
+  return { detected: markers.length > 0, markers };
+}
+
+/**
+ * Best-effort goroutine stitching: find named functions invoked inside `go …`
+ * statements in the source slice that ALSO exist in the graph (resolved from
+ * the hop's outgoing `calls` first, then by global name). Returns the matched
+ * callee nodes so the UI can draw a dashed "causal" link to the goroutine body.
+ * HEURISTIC: only matches simple `go Name(` / `go recv.Name(` / `go func(){ Name( }`
+ * forms; it cannot follow channel sends to their receivers.
+ */
+export function goroutineCallees(
+  graph: KnowledgeGraph,
+  hopId: string,
+  sourceSlice: string | undefined | null,
+): GraphNode[] {
+  if (!sourceSlice) return [];
+  const calleeIndex = new Map<string, GraphNode>();
+  // Prefer the hop's own call targets (most precise).
+  for (const t of callTargets(graph, hopId)) calleeIndex.set(t.name, t);
+  const globalByName = new Map<string, GraphNode>();
+  for (const n of graph.nodes) {
+    if (n.type === "function" && !globalByName.has(n.name)) globalByName.set(n.name, n);
+  }
+  const found = new Map<string, GraphNode>();
+  // `go pkg.Name(` or `go Name(` — capture the final identifier before "(".
+  const goCall = /(^|\W)go\s+(?:[\w]+\.)*([A-Za-z_]\w*)\s*\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = goCall.exec(sourceSlice)) !== null) {
+    const name = m[2];
+    if (!name || name === "func") continue;
+    const node = calleeIndex.get(name) ?? globalByName.get(name);
+    if (node && node.id !== hopId) found.set(node.id, node);
+  }
+  // `go func(){ … Name(…) … }()` — scan calls inside an inline goroutine body.
+  const goFunc = /go\s+func\s*\([^)]*\)\s*\{([\s\S]*?)\}\s*\(\s*\)/g;
+  while ((m = goFunc.exec(sourceSlice)) !== null) {
+    const body = m[1] ?? "";
+    const callRe = /(?:[\w]+\.)*([A-Za-z_]\w*)\s*\(/g;
+    let c: RegExpExecArray | null;
+    while ((c = callRe.exec(body)) !== null) {
+      const name = c[1];
+      if (!name || name === "func") continue;
+      const node = calleeIndex.get(name);
+      if (node && node.id !== hopId) found.set(node.id, node);
+    }
+  }
+  return [...found.values()];
+}
+
+/**
+ * Fuzzy subsequence match + score for the symbol palette. Returns a score
+ * (higher is better) or -1 for no match. Rewards contiguous runs, word-start
+ * hits, and an exact prefix.
+ */
+export function fuzzyScore(query: string, target: string): number {
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  if (!q) return 0;
+  if (t === q) return 10000;
+  if (t.startsWith(q)) return 5000 - t.length;
+  let score = 0;
+  let qi = 0;
+  let prevIdx = -1;
+  let run = 0;
+  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+    if (t[ti] === q[qi]) {
+      let bonus = 10;
+      if (prevIdx === ti - 1) {
+        run++;
+        bonus += run * 8; // contiguous run bonus
+      } else {
+        run = 0;
+      }
+      if (ti === 0 || /[^A-Za-z0-9]/.test(t[ti - 1])) bonus += 15; // word start
+      score += bonus;
+      prevIdx = ti;
+      qi++;
+    }
+  }
+  if (qi < q.length) return -1; // not all query chars matched
+  return score - t.length * 0.5; // mild shorter-is-better tiebreak
+}
+
+/** Rank graph nodes by fuzzy match against a query (cap results). */
+export function fuzzySearchNodes(
+  nodes: GraphNode[],
+  query: string,
+  limit = 30,
+): GraphNode[] {
+  const q = query.trim();
+  if (!q) {
+    return nodes
+      .filter((n) => n.type === "function" || n.type === "class")
+      .slice(0, limit);
+  }
+  const scored: { n: GraphNode; s: number }[] = [];
+  for (const n of nodes) {
+    const s = fuzzyScore(q, n.name);
+    if (s >= 0) scored.push({ n, s });
+  }
+  scored.sort((a, b) => b.s - a.s);
+  return scored.slice(0, limit).map((x) => x.n);
+}
+
 /** Subtree node-count from a node (callees direction), capped depth, cycle-safe. */
 export function subtreeSize(
   graph: KnowledgeGraph,

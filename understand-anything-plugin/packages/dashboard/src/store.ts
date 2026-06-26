@@ -304,6 +304,13 @@ interface DashboardStore {
   tracePathTarget: string | null;
   setPathTarget: (id: string | null) => void;
 
+  /** Wave-2: fuzzy symbol palette (⌘K / ⌘P) open state. */
+  symbolPaletteOpen: boolean;
+  toggleSymbolPalette: () => void;
+  setSymbolPaletteOpen: (open: boolean) => void;
+  /** Wave-2: start a trace at a node from anywhere (palette / goto). */
+  startTraceAt: (id: string) => void;
+
   // Workspace persistence
   workspace: Workspace;
   workspaceLoaded: boolean;
@@ -868,6 +875,20 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   toggleCriticalPath: () => set((s) => ({ traceCriticalPath: !s.traceCriticalPath })),
   tracePathTarget: null,
   setPathTarget: (id) => set({ tracePathTarget: id }),
+
+  // ---- Wave-2: symbol palette + trace-from-anywhere --------------------
+  symbolPaletteOpen: false,
+  toggleSymbolPalette: () => set((s) => ({ symbolPaletteOpen: !s.symbolPaletteOpen })),
+  setSymbolPaletteOpen: (open) => set({ symbolPaletteOpen: open }),
+  startTraceAt: (id) =>
+    set({
+      traceRoot: id,
+      traceStack: [id],
+      tracePathTarget: null,
+      viewMode: "trace",
+      selectedNodeId: id,
+      symbolPaletteOpen: false,
+    }),
 
   // ---- Workspace persistence -------------------------------------------
   workspace: EMPTY_WORKSPACE,

@@ -17,7 +17,15 @@ import {
   defaultMutedPackages,
   matchesFoldPattern,
   subtreeSize,
+  referencesOf,
+  implementationsOf,
+  interfacesOf,
+  containmentBreadcrumb,
+  detectConcurrency,
+  goroutineCallees,
 } from "./traceGraph";
+import ReferencesPanel from "./ReferencesPanel";
+import HoverPopover, { type HoverTarget } from "./HoverPopover";
 import type { GraphNode, KnowledgeGraph } from "@understand-anything/core/types";
 
 interface TraceViewProps {
@@ -71,25 +79,19 @@ function lineLabel(node: GraphNode): string {
   return `${node.filePath ?? ""}:${node.lineRange[0]}–${node.lineRange[1]}`;
 }
 
-function HopCode({
-  node,
-  accessToken,
-  graph,
-  pushTrace,
-}: {
-  node: GraphNode;
-  accessToken: string;
-  graph: KnowledgeGraph;
-  pushTrace: (id: string) => void;
-}) {
+/**
+ * Lift source-file fetching into a hook so HopCard can use the loaded source
+ * for concurrency detection (feature 19) and inline peek (feature 16), while
+ * HopCode renders the highlighted slice.
+ */
+function useHopSource(filePath: string | undefined, accessToken: string): SourceState {
   const [state, setState] = useState<SourceState>({
     status: "idle",
     source: null,
     error: null,
   });
-
   useEffect(() => {
-    if (!node.filePath) {
+    if (!filePath) {
       setState({ status: "error", source: null, error: "No file path for this node." });
       return;
     }
@@ -103,7 +105,7 @@ function HopCode({
     }
     const controller = new AbortController();
     setState({ status: "loading", source: null, error: null });
-    fetch(fileContentUrl(node.filePath, accessToken), { signal: controller.signal })
+    fetch(fileContentUrl(filePath, accessToken), { signal: controller.signal })
       .then(async (res) => {
         const data = (await res.json()) as SourceFile | { error?: string };
         if (!res.ok) {
@@ -120,8 +122,33 @@ function HopCode({
         });
       });
     return () => controller.abort();
-  }, [accessToken, node.filePath]);
+  }, [accessToken, filePath]);
+  return state;
+}
 
+/** Slice the lines [start,end] (1-based inclusive) out of full source. */
+function sliceSource(content: string | undefined, range: { start: number; end: number } | null): string {
+  if (!content || !range) return "";
+  return content.split("\n").slice(Math.max(0, range.start - 1), range.end).join("\n");
+}
+
+function HopCode({
+  node,
+  accessToken,
+  graph,
+  pushTrace,
+  state,
+  inlayHints,
+  onPeekNode,
+}: {
+  node: GraphNode;
+  accessToken: string;
+  graph: KnowledgeGraph;
+  pushTrace: (id: string) => void;
+  state: SourceState;
+  inlayHints: boolean;
+  onPeekNode: (id: string) => void;
+}) {
   const range = node.lineRange ? { start: node.lineRange[0], end: node.lineRange[1] } : null;
   const language = state.source?.language ?? fallbackLanguage(node.filePath);
 
@@ -154,8 +181,79 @@ function HopCode({
         graph={graph}
         currentNodeId={node.id}
         onJumpToNode={(targetId) => pushTrace(targetId)}
+        onPeekNode={onPeekNode}
+        inlayHints={inlayHints}
         fontSizeClass="text-[13px] leading-6"
       />
+    </div>
+  );
+}
+
+/** Inline peek (feature 16): render a callee's definition slice, collapsible. */
+function PeekDefinition({
+  node,
+  accessToken,
+  graph,
+  onClose,
+  onTrace,
+}: {
+  node: GraphNode;
+  accessToken: string;
+  graph: KnowledgeGraph;
+  onClose: () => void;
+  onTrace: (id: string) => void;
+}) {
+  const state = useHopSource(node.filePath, accessToken);
+  const range = node.lineRange ? { start: node.lineRange[0], end: node.lineRange[1] } : null;
+  const language = state.source?.language ?? fallbackLanguage(node.filePath);
+  return (
+    <div
+      data-testid="peek-definition"
+      className="rounded border border-accent/30 bg-root/60 overflow-hidden"
+    >
+      <div className="flex items-center gap-2 px-2.5 py-1.5 bg-accent/10 border-b border-accent/20">
+        <span className="text-[10px] uppercase tracking-wider text-accent">Peek</span>
+        <span className="text-[11px] font-mono text-text-primary truncate flex-1" title={lineLabel(node)}>
+          {node.name} · {lineLabel(node)}
+        </span>
+        <button
+          type="button"
+          onClick={() => onTrace(node.id)}
+          className="text-[10px] font-semibold text-accent hover:text-accent-bright shrink-0"
+          title="Trace into this definition"
+        >
+          ↦ trace
+        </button>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-[10px] text-text-muted hover:text-text-primary shrink-0"
+          title="Close peek"
+        >
+          ✕
+        </button>
+      </div>
+      {state.status === "loading" && <div className="p-3 text-xs text-text-muted">Loading…</div>}
+      {state.status === "error" && (
+        <div className="p-3 text-xs text-text-secondary">Source unavailable: {state.error}</div>
+      )}
+      {state.status === "loaded" && state.source && (
+        <div className="max-h-72 overflow-auto bg-root">
+          <CodeBlock
+            code={state.source.content}
+            language={language}
+            accessToken={accessToken}
+            filePath={node.filePath}
+            highlightedRange={range}
+            windowStart={range ? Math.max(1, range.start) : undefined}
+            windowEnd={range ? range.end : undefined}
+            graph={graph}
+            currentNodeId={node.id}
+            onJumpToNode={(id) => onTrace(id)}
+            fontSizeClass="text-[12px] leading-5"
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -232,11 +330,36 @@ function HopCard({
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [showCallers, setShowCallers] = useState(false);
+  const [showRefs, setShowRefs] = useState(false);
+  const [showImpls, setShowImpls] = useState(false);
+  const [peekId, setPeekId] = useState<string | null>(null);
   const [bundleOpen, setBundleOpen] = useState<Record<string, boolean>>({});
   const color = nodeColorVar(node.type);
   const setTraceRoot = useDashboardStore((s) => s.setTraceRoot);
+  const startTraceAt = useDashboardStore((s) => s.startTraceAt);
   const bundles = useMemo(() => bundleCalleesByPackage(graph, node.id), [graph, node.id]);
   const callers = useMemo(() => callersOf(graph, node.id), [graph, node.id]);
+  const refs = useMemo(() => referencesOf(graph, node.id), [graph, node.id]);
+  const impls = useMemo(() => implementationsOf(graph, node.id), [graph, node.id]);
+  const interfaces = useMemo(() => interfacesOf(graph, node.id), [graph, node.id]);
+  const crumb = useMemo(() => containmentBreadcrumb(node), [node]);
+
+  // Source for this hop (feature 19 concurrency detection + feature 16 peek).
+  const hopSource = useHopSource(node.filePath, accessToken);
+  const range = node.lineRange ? { start: node.lineRange[0], end: node.lineRange[1] } : null;
+  const sourceSlice = useMemo(
+    () => sliceSource(hopSource.source?.content, range),
+    [hopSource.source, range?.start, range?.end],
+  );
+  const concurrency = useMemo(() => detectConcurrency(sourceSlice), [sourceSlice]);
+  const goCallees = useMemo(
+    () => (concurrency.detected ? goroutineCallees(graph, node.id, sourceSlice) : []),
+    [concurrency.detected, graph, node.id, sourceSlice],
+  );
+  const peekNode = useMemo(
+    () => (peekId ? graph.nodes.find((n) => n.id === peekId) ?? null : null),
+    [peekId, graph.nodes],
+  );
   const { state: goNote, explain: explainGo, askFollowUp: askGo, reset: resetGo } =
     useExplain(accessToken, node.id);
   const toggleBookmark = useDashboardStore((s) => s.toggleBookmark);
@@ -297,9 +420,28 @@ function HopCard({
               {isCritical && (
                 <span className="text-[9px] text-accent" title="On the critical path">◆</span>
               )}
+              {concurrency.detected && (
+                <span
+                  data-testid="concurrency-badge"
+                  className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-gold/50 text-gold bg-gold/10 shrink-0"
+                  title={`Go concurrency detected (heuristic): ${concurrency.markers.join(", ")}`}
+                >
+                  ⇄ concurrency
+                </span>
+              )}
             </div>
-            <div className="text-[11px] font-mono text-text-muted truncate" title={lineLabel(node)}>
-              {lineLabel(node)}
+            {/* Feature 17: containment breadcrumb pkg › file › func */}
+            <div
+              data-testid="hop-breadcrumb"
+              className="text-[10px] font-mono text-text-muted truncate flex items-center gap-1"
+              title={lineLabel(node)}
+            >
+              <span className="text-node-file/80">{crumb.pkg}</span>
+              <span className="opacity-50">›</span>
+              <span className="text-node-class/80">{crumb.file}</span>
+              <span className="opacity-50">›</span>
+              <span className="text-text-secondary">{crumb.name}</span>
+              {node.lineRange && <span className="opacity-50">:{node.lineRange[0]}</span>}
             </div>
           </div>
           <button
@@ -396,7 +538,105 @@ function HopCard({
               ▲ {callers.length} caller{callers.length === 1 ? "" : "s"}
             </button>
           )}
+          {/* Feature 13: find references / callers panel */}
+          {refs.length > 0 && (
+            <button
+              type="button"
+              data-testid="references-button"
+              onClick={() => setShowRefs((v) => !v)}
+              className={`text-[10px] font-semibold px-2 py-1 rounded border transition-colors ${
+                showRefs
+                  ? "border-accent/60 text-accent bg-accent/10"
+                  : "border-border-subtle text-text-muted hover:text-text-primary"
+              }`}
+              title="Find references — every caller / importer grouped by file"
+            >
+              ↪ {refs.length} reference{refs.length === 1 ? "" : "s"}
+            </button>
+          )}
+          {/* Feature 14: go-to-implementation (interface → impls) */}
+          {impls.length > 0 && (
+            <button
+              type="button"
+              data-testid="implementations-button"
+              onClick={() => setShowImpls((v) => !v)}
+              className={`text-[10px] font-semibold px-2 py-1 rounded border transition-colors ${
+                showImpls
+                  ? "border-node-class/60 text-node-class bg-node-class/10"
+                  : "border-border-subtle text-text-muted hover:text-text-primary"
+              }`}
+              title="Show concrete implementations of this interface"
+            >
+              ◇ implementations ({impls.length})
+            </button>
+          )}
+          {/* Feature 14: impl → interface */}
+          {interfaces.length > 0 && (
+            <button
+              type="button"
+              data-testid="interface-button"
+              onClick={() => startTraceAt(interfaces[0].id)}
+              className="text-[10px] font-semibold px-2 py-1 rounded border border-border-subtle text-text-muted hover:text-node-class hover:border-node-class/60 transition-colors"
+              title={`Go to interface: ${interfaces[0].name}`}
+            >
+              ◆ go to interface
+            </button>
+          )}
         </div>
+
+        {/* Feature 14: implementations expander */}
+        {showImpls && impls.length > 0 && (
+          <div className="px-3 pb-2.5 -mt-1" data-testid="implementations-list">
+            <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5">
+              Implementations — click to trace through that impl
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {impls.map((im) => (
+                <button
+                  key={im.id}
+                  type="button"
+                  onClick={() => startTraceAt(im.id)}
+                  className="text-[11px] px-2 py-1 rounded border border-node-class/30 text-node-class hover:border-node-class/60 hover:bg-node-class/10 transition-colors font-mono"
+                  title={lineLabel(im)}
+                >
+                  ◇ {packageLabel(packageOf(im))} → {im.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Feature 13: references panel grouped by file */}
+        {showRefs && (
+          <ReferencesPanel
+            node={node}
+            graph={graph}
+            onClose={() => setShowRefs(false)}
+            onJump={(id) => setTraceRoot(id)}
+          />
+        )}
+
+        {/* Feature 19: goroutine stitching — dashed causal links to goroutine bodies */}
+        {goCallees.length > 0 && (
+          <div className="px-3 pb-2.5 -mt-1" data-testid="goroutine-links">
+            <div className="text-[10px] uppercase tracking-wider text-gold/80 mb-1.5">
+              ⇄ goroutine bodies (heuristic) — follow the concurrent callee
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {goCallees.map((g) => (
+                <button
+                  key={g.id}
+                  type="button"
+                  onClick={() => pushTrace(g.id)}
+                  className="text-[11px] px-2 py-1 rounded border border-dashed border-gold/50 text-gold hover:bg-gold/10 transition-colors font-mono"
+                  title={`go → ${g.name} (${lineLabel(g)})`}
+                >
+                  ⇢ go {g.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Callers list (walk-up) */}
         {showCallers && callers.length > 0 && (
@@ -501,7 +741,31 @@ function HopCard({
 
         {expanded && (
           <div className="border-t border-border-subtle">
-            <HopCode node={node} accessToken={accessToken} graph={graph} pushTrace={pushTrace} />
+            <HopCode
+              node={node}
+              accessToken={accessToken}
+              graph={graph}
+              pushTrace={pushTrace}
+              state={hopSource}
+              inlayHints
+              onPeekNode={(id) => setPeekId((cur) => (cur === id ? null : id))}
+            />
+          </div>
+        )}
+
+        {/* Feature 16: inline peek of a callee definition (collapsible) */}
+        {peekNode && (
+          <div className="px-3 py-2.5 border-t border-border-subtle bg-surface/30">
+            <PeekDefinition
+              node={peekNode}
+              accessToken={accessToken}
+              graph={graph}
+              onClose={() => setPeekId(null)}
+              onTrace={(id) => {
+                setPeekId(null);
+                pushTrace(id);
+              }}
+            />
           </div>
         )}
 
@@ -509,7 +773,7 @@ function HopCard({
         {totalCallees > 0 && (
           <div className="px-3 py-2.5 border-t border-border-subtle bg-surface/40">
             <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5">
-              Calls ({totalCallees}) — click to descend
+              Calls ({totalCallees}) — click to descend · ⊙ peek inline
             </div>
             <div className="flex flex-wrap gap-1.5">
               {bundles.map((b) => {
@@ -531,15 +795,13 @@ function HopCard({
                       {open && (
                         <span className="flex flex-wrap gap-1.5 pl-2">
                           {b.nodes.map((t) => (
-                            <button
+                            <CalleeChip
                               key={t.id}
-                              type="button"
-                              onClick={() => pushTrace(t.id)}
-                              className="text-[11px] px-2 py-1 rounded border border-accent/30 text-accent hover:text-accent-bright hover:border-accent/60 hover:bg-accent/10 transition-colors font-mono"
-                              title={lineLabel(t)}
-                            >
-                              {t.name} →
-                            </button>
+                              node={t}
+                              active={peekId === t.id}
+                              onDescend={() => pushTrace(t.id)}
+                              onPeek={() => setPeekId((cur) => (cur === t.id ? null : t.id))}
+                            />
                           ))}
                         </span>
                       )}
@@ -547,15 +809,13 @@ function HopCard({
                   );
                 }
                 return b.nodes.map((t) => (
-                  <button
+                  <CalleeChip
                     key={t.id}
-                    type="button"
-                    onClick={() => pushTrace(t.id)}
-                    className="text-[11px] px-2 py-1 rounded border border-accent/30 text-accent hover:text-accent-bright hover:border-accent/60 hover:bg-accent/10 transition-colors font-mono"
-                    title={lineLabel(t)}
-                  >
-                    {t.name} →
-                  </button>
+                    node={t}
+                    active={peekId === t.id}
+                    onDescend={() => pushTrace(t.id)}
+                    onPeek={() => setPeekId((cur) => (cur === t.id ? null : t.id))}
+                  />
                 ));
               })}
             </div>
@@ -563,6 +823,67 @@ function HopCard({
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * A callee chip: click name → descend (trace); click ⊙ → peek inline (feature
+ * 16). Hovering the chip shows the hover popover (feature 15).
+ */
+function CalleeChip({
+  node,
+  active,
+  onDescend,
+  onPeek,
+}: {
+  node: GraphNode;
+  active: boolean;
+  onDescend: () => void;
+  onPeek: () => void;
+}) {
+  const graph = useDashboardStore((s) => s.graph);
+  const [hover, setHover] = useState<HoverTarget | null>(null);
+  const timer = useRef<number | null>(null);
+  const closeTimer = useRef<number | null>(null);
+
+  const onEnter = (e: React.MouseEvent) => {
+    if (!graph) return;
+    const x = e.clientX;
+    const y = e.clientY;
+    if (closeTimer.current) window.clearTimeout(closeTimer.current);
+    timer.current = window.setTimeout(() => setHover({ node, x, y }), 350);
+  };
+  const onLeave = () => {
+    if (timer.current) window.clearTimeout(timer.current);
+    closeTimer.current = window.setTimeout(() => setHover(null), 220);
+  };
+
+  return (
+    <span className="inline-flex items-stretch rounded border border-accent/30 overflow-hidden" onMouseEnter={onEnter} onMouseLeave={onLeave}>
+      <button
+        type="button"
+        onClick={onPeek}
+        className={`text-[11px] px-1.5 py-1 border-r border-accent/30 font-mono transition-colors ${
+          active ? "bg-accent/20 text-accent-bright" : "text-accent/70 hover:text-accent hover:bg-accent/10"
+        }`}
+        title="Peek this definition inline"
+      >
+        ⊙
+      </button>
+      <button
+        type="button"
+        onClick={onDescend}
+        className="text-[11px] px-2 py-1 text-accent hover:text-accent-bright hover:bg-accent/10 transition-colors font-mono"
+        title={lineLabel(node)}
+      >
+        {node.name} →
+      </button>
+      {hover && (
+        <span onMouseEnter={() => closeTimer.current && window.clearTimeout(closeTimer.current)}>
+          <HoverPopover target={hover} onClose={() => setHover(null)} />
+        </span>
+      )}
+    </span>
   );
 }
 
