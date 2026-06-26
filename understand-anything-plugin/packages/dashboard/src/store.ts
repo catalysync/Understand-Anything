@@ -274,6 +274,36 @@ interface DashboardStore {
   /** Truncate the trace breadcrumb to the first `length` entries (>=1). */
   truncateTrace: (length: number) => void;
 
+  // ---- Wave-1 trace navigation UI state --------------------------------
+  /** "callees" walks outgoing calls (default); "callers" walks incoming. */
+  traceDirection: "callees" | "callers";
+  setTraceDirection: (dir: "callees" | "callers") => void;
+  /** Build depth for the trace (1–6). */
+  traceDepth: number;
+  setTraceDepth: (depth: number) => void;
+  /** Layout for the trace body. */
+  traceLayout: "nested" | "flat" | "shape";
+  setTraceLayout: (layout: "nested" | "flat" | "shape") => void;
+  /** Substring/glob patterns; hops whose name matches fold to a thin row. */
+  traceFoldedPatterns: string[];
+  addFoldPattern: (pattern: string) => void;
+  removeFoldPattern: (pattern: string) => void;
+  /** Per-hop manual unfold overrides (node ids forced visible). */
+  traceUnfolded: Set<string>;
+  toggleUnfold: (nodeId: string) => void;
+  /** Packages that are muted (greyed + collapsed + excluded from explain). */
+  traceMutedPackages: Set<string>;
+  toggleMutedPackage: (pkg: string) => void;
+  /** Whether default-mute seeding has run for the current graph. */
+  traceMuteSeeded: boolean;
+  seedMutedPackages: (pkgs: string[]) => void;
+  /** Critical-path highlight toggle. */
+  traceCriticalPath: boolean;
+  toggleCriticalPath: () => void;
+  /** "Path to…" target node id (path-between-two-nodes mode). */
+  tracePathTarget: string | null;
+  setPathTarget: (id: string | null) => void;
+
   // Workspace persistence
   workspace: Workspace;
   workspaceLoaded: boolean;
@@ -773,12 +803,12 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
 
   traceRoot: null,
   traceStack: [],
-  setTraceRoot: (id) => set({ traceRoot: id, traceStack: [id] }),
+  setTraceRoot: (id) => set({ traceRoot: id, traceStack: [id], tracePathTarget: null }),
   pushTrace: (id) =>
     set((state) => {
       // Avoid pushing a duplicate of the current focus node.
       if (state.traceStack[state.traceStack.length - 1] === id) return {};
-      return { traceStack: [...state.traceStack, id] };
+      return { traceStack: [...state.traceStack, id], tracePathTarget: null };
     }),
   popTrace: () =>
     set((state) => {
@@ -791,6 +821,53 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       if (n === state.traceStack.length) return {};
       return { traceStack: state.traceStack.slice(0, n) };
     }),
+
+  // ---- Wave-1 trace navigation UI state --------------------------------
+  traceDirection: "callees",
+  setTraceDirection: (dir) => set({ traceDirection: dir }),
+  traceDepth: 4,
+  setTraceDepth: (depth) => set({ traceDepth: Math.max(1, Math.min(6, depth)) }),
+  traceLayout: "nested",
+  setTraceLayout: (layout) => set({ traceLayout: layout }),
+  traceFoldedPatterns: [],
+  addFoldPattern: (pattern) =>
+    set((state) => {
+      const p = pattern.trim();
+      if (!p || state.traceFoldedPatterns.includes(p)) return {};
+      return { traceFoldedPatterns: [...state.traceFoldedPatterns, p] };
+    }),
+  removeFoldPattern: (pattern) =>
+    set((state) => ({
+      traceFoldedPatterns: state.traceFoldedPatterns.filter((p) => p !== pattern),
+    })),
+  traceUnfolded: new Set<string>(),
+  toggleUnfold: (nodeId) =>
+    set((state) => {
+      const next = new Set(state.traceUnfolded);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return { traceUnfolded: next };
+    }),
+  traceMutedPackages: new Set<string>(),
+  toggleMutedPackage: (pkg) =>
+    set((state) => {
+      const next = new Set(state.traceMutedPackages);
+      if (next.has(pkg)) next.delete(pkg);
+      else next.add(pkg);
+      return { traceMutedPackages: next };
+    }),
+  traceMuteSeeded: false,
+  seedMutedPackages: (pkgs) =>
+    set((state) => {
+      if (state.traceMuteSeeded) return {};
+      const next = new Set(state.traceMutedPackages);
+      for (const p of pkgs) next.add(p);
+      return { traceMutedPackages: next, traceMuteSeeded: true };
+    }),
+  traceCriticalPath: false,
+  toggleCriticalPath: () => set((s) => ({ traceCriticalPath: !s.traceCriticalPath })),
+  tracePathTarget: null,
+  setPathTarget: (id) => set({ tracePathTarget: id }),
 
   // ---- Workspace persistence -------------------------------------------
   workspace: EMPTY_WORKSPACE,

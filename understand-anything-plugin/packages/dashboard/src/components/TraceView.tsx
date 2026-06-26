@@ -1,8 +1,23 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useDashboardStore } from "../store";
 import CodeBlock from "./CodeBlock";
 import { useExplain } from "./useCodeAssist";
 import ExplainPanel from "./ExplainPanel";
+import TraceControls from "./TraceControls";
+import {
+  buildTrace,
+  callTargets,
+  callersOf,
+  criticalPath as computeCriticalPath,
+  pathBetween,
+  bundleCalleesByPackage,
+  packageOf,
+  packageLabel,
+  packagesIn,
+  defaultMutedPackages,
+  matchesFoldPattern,
+  subtreeSize,
+} from "./traceGraph";
 import type { GraphNode, KnowledgeGraph } from "@understand-anything/core/types";
 
 interface TraceViewProps {
@@ -54,51 +69,6 @@ function fallbackLanguage(filePath: string | undefined): string {
 function lineLabel(node: GraphNode): string {
   if (!node.lineRange) return node.filePath ?? "—";
   return `${node.filePath ?? ""}:${node.lineRange[0]}–${node.lineRange[1]}`;
-}
-
-/**
- * Build the ordered call chain from a focus node by walking OUTGOING `calls`
- * edges (with `contains` used to surface a file's functions) up to `maxDepth`.
- * Dedups by id and preserves first-visit order.
- */
-function buildTrace(
-  graph: KnowledgeGraph,
-  focusId: string,
-  maxDepth = 4,
-): GraphNode[] {
-  const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
-  const ordered: GraphNode[] = [];
-  const seen = new Set<string>();
-
-  const visit = (id: string, depth: number) => {
-    if (seen.has(id) || depth > maxDepth) return;
-    const node = nodesById.get(id);
-    if (!node) return;
-    seen.add(id);
-    ordered.push(node);
-    // Follow calls first (primary), then contains to surface functions.
-    const next = graph.edges
-      .filter(
-        (e) =>
-          e.source === id &&
-          (e.type === "calls" || e.type === "contains"),
-      )
-      // calls before contains so the call path reads naturally
-      .sort((a, b) => (a.type === b.type ? 0 : a.type === "calls" ? -1 : 1));
-    for (const e of next) visit(e.target, depth + 1);
-  };
-
-  visit(focusId, 0);
-  return ordered;
-}
-
-/** Outgoing `calls` targets for a single node (for the descend chips). */
-function callTargets(graph: KnowledgeGraph, id: string): GraphNode[] {
-  const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
-  return graph.edges
-    .filter((e) => e.source === id && e.type === "calls")
-    .map((e) => nodesById.get(e.target))
-    .filter((n): n is GraphNode => n !== undefined);
 }
 
 function HopCode({
@@ -168,7 +138,6 @@ function HopCode({
   const source = state.source;
   if (!source) return null;
 
-  // Only render a window around the highlighted range to stay light.
   const windowStart = range ? Math.max(1, range.start - 8) : undefined;
   const windowEnd = range ? range.end + 12 : undefined;
 
@@ -191,6 +160,47 @@ function HopCode({
   );
 }
 
+/** Thin one-line row for a folded or muted hop. */
+function FoldedHopRow({
+  node,
+  index,
+  reason,
+  onUnfold,
+}: {
+  node: GraphNode;
+  index: number;
+  reason: "folded" | "muted";
+  onUnfold: () => void;
+}) {
+  const color = nodeColorVar(node.type);
+  return (
+    <div className="relative pl-6">
+      <div className="absolute left-2 top-0 bottom-0 w-px bg-border-subtle" />
+      <div
+        className="absolute left-[3px] top-3 w-2.5 h-2.5 rounded-full border-2 opacity-50"
+        style={{ borderColor: color, backgroundColor: "var(--color-surface, #1a1a1a)" }}
+      />
+      <div className="flex items-center gap-2 rounded border border-border-subtle/60 bg-elevated/30 px-3 py-1.5 opacity-70">
+        <span className="text-[10px] font-mono text-text-muted shrink-0">{index + 1}</span>
+        <span className="text-[11px] font-mono text-text-muted truncate flex-1" title={node.name}>
+          {node.name}
+        </span>
+        <span className="text-[9px] uppercase tracking-wider text-text-muted shrink-0">
+          {reason === "muted" ? `muted · ${packageLabel(packageOf(node))}` : "folded"}
+        </span>
+        <button
+          type="button"
+          onClick={onUnfold}
+          className="text-[10px] font-semibold text-accent hover:text-accent-bright shrink-0"
+          title="Un-fold this hop"
+        >
+          show
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function HopCard({
   node,
   index,
@@ -198,6 +208,13 @@ function HopCard({
   accessToken,
   graph,
   pushTrace,
+  isCritical,
+  dimmed,
+  muted,
+  onStepInto,
+  onStepOver,
+  onStepOut,
+  registerRef,
 }: {
   node: GraphNode;
   index: number;
@@ -205,16 +222,24 @@ function HopCard({
   accessToken: string;
   graph: KnowledgeGraph;
   pushTrace: (id: string) => void;
+  isCritical: boolean;
+  dimmed: boolean;
+  muted: boolean;
+  onStepInto: (id: string) => void;
+  onStepOver: () => void;
+  onStepOut: () => void;
+  registerRef?: (el: HTMLDivElement | null) => void;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const [showCallers, setShowCallers] = useState(false);
+  const [bundleOpen, setBundleOpen] = useState<Record<string, boolean>>({});
   const color = nodeColorVar(node.type);
-  const targets = callTargets(graph, node.id);
+  const setTraceRoot = useDashboardStore((s) => s.setTraceRoot);
+  const bundles = useMemo(() => bundleCalleesByPackage(graph, node.id), [graph, node.id]);
+  const callers = useMemo(() => callersOf(graph, node.id), [graph, node.id]);
   const { state: goNote, explain: explainGo, askFollowUp: askGo, reset: resetGo } =
     useExplain(accessToken, node.id);
   const toggleBookmark = useDashboardStore((s) => s.toggleBookmark);
-  // Select stable references (the arrays), then derive with useMemo so we
-  // don't return a fresh array/boolean from the selector each render (which
-  // would trigger zustand's getSnapshot warning + an update loop).
   const allBookmarks = useDashboardStore((s) => s.workspace.bookmarks);
   const allAnnotations = useDashboardStore((s) => s.workspace.annotations);
   const bookmarked = useMemo(
@@ -235,8 +260,10 @@ function HopCard({
     explainGo(node.filePath, node.lineRange[0], node.lineRange[1], node.lineRange[0]);
   };
 
+  const totalCallees = bundles.reduce((acc, b) => acc + b.nodes.length, 0);
+
   return (
-    <div className="relative pl-6">
+    <div className={`relative pl-6 transition-opacity ${dimmed ? "opacity-40" : ""}`} ref={registerRef}>
       {/* Connector rail */}
       <div className="absolute left-2 top-0 bottom-0 w-px bg-border-subtle" />
       <div
@@ -244,7 +271,11 @@ function HopCard({
         style={{ borderColor: color, backgroundColor: "var(--color-surface, #1a1a1a)" }}
       />
 
-      <div className="rounded-lg border border-border-subtle bg-elevated/60 overflow-hidden">
+      <div
+        className={`rounded-lg border bg-elevated/60 overflow-hidden ${
+          isCritical ? "border-accent ring-1 ring-accent/50" : "border-border-subtle"
+        }`}
+      >
         {/* Header */}
         <div className="px-3 py-2.5 flex items-start gap-2">
           <span className="text-[10px] font-mono text-text-muted mt-0.5 shrink-0">
@@ -261,8 +292,11 @@ function HopCard({
             {node.type}
           </span>
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-heading text-text-primary truncate" title={node.name}>
+            <div className="text-sm font-heading text-text-primary truncate flex items-center gap-1.5" title={node.name}>
               {node.name}
+              {isCritical && (
+                <span className="text-[9px] text-accent" title="On the critical path">◆</span>
+              )}
             </div>
             <div className="text-[11px] font-mono text-text-muted truncate" title={lineLabel(node)}>
               {lineLabel(node)}
@@ -312,12 +346,85 @@ function HopCard({
           </button>
         </div>
 
-        {/* Explanation (pre-generated narration — no API) */}
+        {/* Navigation affordances row: focus + step into/over/out + callers expander */}
+        <div className="px-3 pb-2 flex items-center gap-1.5 flex-wrap">
+          <button
+            type="button"
+            onClick={() => setTraceRoot(node.id)}
+            className="text-[10px] font-semibold px-2 py-1 rounded border border-gold/40 text-gold hover:text-gold-bright hover:border-gold/70 transition-colors"
+            title="Re-root the trace at this node (focus subtree)"
+          >
+            ⊙ focus
+          </button>
+          <div className="flex rounded border border-border-subtle overflow-hidden">
+            <button
+              type="button"
+              onClick={() => onStepInto(node.id)}
+              className="text-[10px] font-semibold px-2 py-1 text-text-muted hover:text-text-primary transition-colors"
+              title="Step into — descend into this hop"
+            >
+              ↳ into
+            </button>
+            <button
+              type="button"
+              onClick={onStepOver}
+              className="text-[10px] font-semibold px-2 py-1 text-text-muted hover:text-text-primary transition-colors border-l border-border-subtle"
+              title="Step over — collapse and skip to next sibling"
+            >
+              ↷ over
+            </button>
+            <button
+              type="button"
+              onClick={onStepOut}
+              className="text-[10px] font-semibold px-2 py-1 text-text-muted hover:text-text-primary transition-colors border-l border-border-subtle"
+              title="Step out — return to the parent hop"
+            >
+              ↰ out
+            </button>
+          </div>
+          {callers.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowCallers((v) => !v)}
+              className={`text-[10px] font-semibold px-2 py-1 rounded border transition-colors ${
+                showCallers
+                  ? "border-node-schema/60 text-node-schema bg-node-schema/10"
+                  : "border-border-subtle text-text-muted hover:text-text-primary"
+              }`}
+              title="Show who calls this node"
+            >
+              ▲ {callers.length} caller{callers.length === 1 ? "" : "s"}
+            </button>
+          )}
+        </div>
+
+        {/* Callers list (walk-up) */}
+        {showCallers && callers.length > 0 && (
+          <div className="px-3 pb-2.5 -mt-1">
+            <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5">
+              Called by — click to focus that caller
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {callers.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => setTraceRoot(c.id)}
+                  className="text-[11px] px-2 py-1 rounded border border-node-schema/30 text-node-schema hover:border-node-schema/60 hover:bg-node-schema/10 transition-colors font-mono"
+                  title={lineLabel(c)}
+                >
+                  ▲ {c.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Explanation */}
         <div className="px-3 pb-2.5 -mt-1">
           <p className="text-[12px] text-text-secondary leading-relaxed">
             {node.summary?.trim() ? node.summary : "—"}
           </p>
-          {/* Pinned annotations for this hop */}
           {annotations.length > 0 && (
             <div className="mt-2 space-y-1.5">
               {annotations.map((a) => (
@@ -342,7 +449,6 @@ function HopCard({
             </div>
           )}
 
-          {/* Note input */}
           {noteOpen && (
             <div className="mt-2 flex items-center gap-2">
               <input
@@ -374,8 +480,8 @@ function HopCard({
             </div>
           )}
 
-          {/* Go note — lazy, on click, calls /explain.json for this hop's lineRange */}
-          {node.filePath && node.lineRange && (
+          {/* Go note — excluded for muted hops */}
+          {!muted && node.filePath && node.lineRange && (
             <div className="mt-1.5">
               {goNote.status === "idle" ? (
                 <button
@@ -387,47 +493,176 @@ function HopCard({
                   ✦ Teach me the Go here
                 </button>
               ) : (
-                <ExplainPanel
-                  state={goNote}
-                  title="✦ Go note"
-                  onClose={resetGo}
-                  onAsk={askGo}
-                />
+                <ExplainPanel state={goNote} title="✦ Go note" onClose={resetGo} onAsk={askGo} />
               )}
             </div>
           )}
         </div>
 
         {expanded && (
-          <>
-            <div className="border-t border-border-subtle">
-              <HopCode node={node} accessToken={accessToken} graph={graph} pushTrace={pushTrace} />
-            </div>
-          </>
+          <div className="border-t border-border-subtle">
+            <HopCode node={node} accessToken={accessToken} graph={graph} pushTrace={pushTrace} />
+          </div>
         )}
 
-        {/* Outgoing call chips */}
-        {targets.length > 0 && (
+        {/* Outgoing calls — bundled by package when many into the same package */}
+        {totalCallees > 0 && (
           <div className="px-3 py-2.5 border-t border-border-subtle bg-surface/40">
             <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5">
-              Calls ({targets.length}) — click to descend
+              Calls ({totalCallees}) — click to descend
             </div>
             <div className="flex flex-wrap gap-1.5">
-              {targets.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => pushTrace(t.id)}
-                  className="text-[11px] px-2 py-1 rounded border border-accent/30 text-accent hover:text-accent-bright hover:border-accent/60 hover:bg-accent/10 transition-colors font-mono"
-                  title={lineLabel(t)}
-                >
-                  {t.name} →
-                </button>
-              ))}
+              {bundles.map((b) => {
+                // Bundle 3+ calls into the same package into one expandable row.
+                if (b.nodes.length >= 3) {
+                  const open = bundleOpen[b.pkg];
+                  return (
+                    <span key={b.pkg} className="inline-flex flex-col gap-1">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setBundleOpen((s) => ({ ...s, [b.pkg]: !s[b.pkg] }))
+                        }
+                        className="text-[11px] px-2 py-1 rounded border border-gold/40 text-gold hover:text-gold-bright hover:border-gold/70 transition-colors font-mono"
+                        title={`${b.nodes.length} calls into ${b.pkg}`}
+                      >
+                        → {packageLabel(b.pkg)} ({b.nodes.length}) {open ? "▾" : "▸"}
+                      </button>
+                      {open && (
+                        <span className="flex flex-wrap gap-1.5 pl-2">
+                          {b.nodes.map((t) => (
+                            <button
+                              key={t.id}
+                              type="button"
+                              onClick={() => pushTrace(t.id)}
+                              className="text-[11px] px-2 py-1 rounded border border-accent/30 text-accent hover:text-accent-bright hover:border-accent/60 hover:bg-accent/10 transition-colors font-mono"
+                              title={lineLabel(t)}
+                            >
+                              {t.name} →
+                            </button>
+                          ))}
+                        </span>
+                      )}
+                    </span>
+                  );
+                }
+                return b.nodes.map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => pushTrace(t.id)}
+                    className="text-[11px] px-2 py-1 rounded border border-accent/30 text-accent hover:text-accent-bright hover:border-accent/60 hover:bg-accent/10 transition-colors font-mono"
+                    title={lineLabel(t)}
+                  >
+                    {t.name} →
+                  </button>
+                ));
+              })}
             </div>
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Minimap rail: indented outline of all hops; active subtree highlighted. */
+function Minimap({
+  hops,
+  focusId,
+  criticalIds,
+  onPick,
+}: {
+  hops: GraphNode[];
+  focusId: string;
+  criticalIds: Set<string>;
+  onPick: (id: string) => void;
+}) {
+  return (
+    <div className="rounded-lg border border-border-subtle bg-surface/50 p-2 sticky top-2">
+      <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5 px-1">
+        Minimap ({hops.length})
+      </div>
+      <div className="space-y-0.5 max-h-[70vh] overflow-auto">
+        {hops.map((h, i) => {
+          const active = h.id === focusId;
+          const crit = criticalIds.has(h.id);
+          return (
+            <button
+              key={`${h.id}-${i}`}
+              type="button"
+              onClick={() => onPick(h.id)}
+              className={`block w-full text-left text-[10px] font-mono truncate px-1.5 py-0.5 rounded transition-colors ${
+                active
+                  ? "bg-accent/15 text-accent"
+                  : crit
+                    ? "text-accent/80 hover:bg-elevated"
+                    : "text-text-muted hover:bg-elevated hover:text-text-primary"
+              }`}
+              style={{ paddingLeft: `${6 + Math.min(i, 8) * 6}px` }}
+              title={h.name}
+            >
+              {crit ? "◆ " : ""}
+              {h.name}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** "Shape" layout: horizontal bars sized by subtree node-count. */
+function ShapeView({
+  hops,
+  graph,
+  direction,
+  onPick,
+}: {
+  hops: GraphNode[];
+  graph: KnowledgeGraph;
+  direction: "callees" | "callers";
+  onPick: (id: string) => void;
+}) {
+  const sizes = useMemo(
+    () => hops.map((h) => subtreeSize(graph, h.id, direction)),
+    [hops, graph, direction],
+  );
+  const max = Math.max(1, ...sizes);
+  return (
+    <div className="space-y-1.5">
+      {hops.map((h, i) => {
+        const pct = Math.max(6, Math.round((sizes[i] / max) * 100));
+        const color = nodeColorVar(h.type);
+        return (
+          <button
+            key={`${h.id}-${i}`}
+            type="button"
+            onClick={() => onPick(h.id)}
+            className="block w-full text-left group"
+            title={`${h.name} — subtree ${sizes[i]}`}
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-mono text-text-muted w-6 shrink-0">{i + 1}</span>
+              <div className="flex-1 h-5 rounded bg-elevated/40 overflow-hidden relative">
+                <div
+                  className="h-full rounded transition-all group-hover:brightness-125"
+                  style={{
+                    width: `${pct}%`,
+                    backgroundColor: `color-mix(in srgb, ${color} 45%, transparent)`,
+                  }}
+                />
+                <span className="absolute inset-0 flex items-center px-2 text-[11px] font-mono text-text-primary truncate">
+                  {h.name}
+                </span>
+              </div>
+              <span className="text-[10px] font-mono text-text-muted w-8 text-right shrink-0">
+                {sizes[i]}
+              </span>
+            </div>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -439,12 +674,29 @@ export default function TraceView({ accessToken }: TraceViewProps) {
   const pushTrace = useDashboardStore((s) => s.pushTrace);
   const popTrace = useDashboardStore((s) => s.popTrace);
   const truncateTrace = useDashboardStore((s) => s.truncateTrace);
+  const setTraceRoot = useDashboardStore((s) => s.setTraceRoot);
   const selectNode = useDashboardStore((s) => s.selectNode);
   const setViewMode = useDashboardStore((s) => s.setViewMode);
   const saveTour = useDashboardStore((s) => s.saveTour);
   const toggleBookmarksPanel = useDashboardStore((s) => s.toggleBookmarksPanel);
+
+  // Wave-1 nav state
+  const direction = useDashboardStore((s) => s.traceDirection);
+  const depth = useDashboardStore((s) => s.traceDepth);
+  const layout = useDashboardStore((s) => s.traceLayout);
+  const foldedPatterns = useDashboardStore((s) => s.traceFoldedPatterns);
+  const unfolded = useDashboardStore((s) => s.traceUnfolded);
+  const toggleUnfold = useDashboardStore((s) => s.toggleUnfold);
+  const mutedPackages = useDashboardStore((s) => s.traceMutedPackages);
+  const muteSeeded = useDashboardStore((s) => s.traceMuteSeeded);
+  const seedMutedPackages = useDashboardStore((s) => s.seedMutedPackages);
+  const criticalOn = useDashboardStore((s) => s.traceCriticalPath);
+  const pathTarget = useDashboardStore((s) => s.tracePathTarget);
+  const setPathTarget = useDashboardStore((s) => s.setPathTarget);
+
   const [copied, setCopied] = useState(false);
   const [tourSaved, setTourSaved] = useState(false);
+  const hopRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
   const focusId = traceStack.length > 0 ? traceStack[traceStack.length - 1] : traceRoot;
 
@@ -453,10 +705,34 @@ export default function TraceView({ accessToken }: TraceViewProps) {
     [graph],
   );
 
-  const hops = useMemo(() => {
+  const rawHops = useMemo(() => {
     if (!graph || !focusId) return [];
-    return buildTrace(graph, focusId);
-  }, [graph, focusId]);
+    return buildTrace(graph, focusId, depth, direction);
+  }, [graph, focusId, depth, direction]);
+
+  // Path-between-two-nodes mode overrides the normal hop list.
+  const pathHops = useMemo(() => {
+    if (!graph || !focusId || !pathTarget) return null;
+    const ids = pathBetween(graph, focusId, pathTarget, true);
+    if (!ids) return [];
+    return ids.map((id) => nodesById.get(id)).filter((n): n is GraphNode => n !== undefined);
+  }, [graph, focusId, pathTarget, nodesById]);
+
+  const hops = pathHops ?? rawHops;
+
+  // Critical path ids (only meaningful in callees/callers tree mode).
+  const criticalIds = useMemo(() => {
+    if (!graph || !focusId || !criticalOn || pathTarget) return new Set<string>();
+    return computeCriticalPath(graph, focusId, direction);
+  }, [graph, focusId, criticalOn, direction, pathTarget]);
+
+  // Packages present in the trace + default-mute seeding.
+  const packagesPresent = useMemo(() => packagesIn(hops), [hops]);
+  useEffect(() => {
+    if (!muteSeeded && packagesPresent.length > 0) {
+      seedMutedPackages(defaultMutedPackages(packagesPresent));
+    }
+  }, [muteSeeded, packagesPresent, seedMutedPackages]);
 
   if (!graph) {
     return (
@@ -481,12 +757,14 @@ export default function TraceView({ accessToken }: TraceViewProps) {
 
   const focusNode = nodesById.get(focusId)!;
   const rootNode = traceRoot ? nodesById.get(traceRoot) : undefined;
-  const directCalls = callTargets(graph, focusId);
   const totalCalls = hops.reduce((acc, h) => acc + callTargets(graph, h.id).length, 0);
 
   const breadcrumb = traceStack
     .map((id) => nodesById.get(id))
     .filter((n): n is GraphNode => n !== undefined);
+
+  const parentId =
+    traceStack.length > 1 ? traceStack[traceStack.length - 2] : null;
 
   const copyTrace = () => {
     const lines = hops.map((h, i) => {
@@ -501,6 +779,75 @@ export default function TraceView({ accessToken }: TraceViewProps) {
       window.setTimeout(() => setCopied(false), 1800);
     });
   };
+
+  // Classify each hop for fold/mute rendering. Path mode renders all hops raw.
+  type HopClass = "full" | "folded" | "muted";
+  const classify = (n: GraphNode): HopClass => {
+    if (pathTarget) return "full";
+    if (unfolded.has(n.id)) return "full";
+    if (mutedPackages.has(packageOf(n))) return "muted";
+    if (matchesFoldPattern(n.name, foldedPatterns)) return "folded";
+    return "full";
+  };
+
+  // Step ops (pure tree ops over the breadcrumb stack).
+  const stepInto = (id: string) => pushTrace(id);
+  const stepOut = () => popTrace();
+  const stepOver = (idx: number) => {
+    const next = hopRefs.current.get(idx + 1);
+    if (next) next.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
+  const renderHop = (node: GraphNode, i: number) => {
+    const cls = classify(node);
+    if (cls === "folded") {
+      return (
+        <FoldedHopRow
+          key={`${node.id}-${i}`}
+          node={node}
+          index={i}
+          reason="folded"
+          onUnfold={() => toggleUnfold(node.id)}
+        />
+      );
+    }
+    if (cls === "muted") {
+      return (
+        <FoldedHopRow
+          key={`${node.id}-${i}`}
+          node={node}
+          index={i}
+          reason="muted"
+          onUnfold={() => toggleUnfold(node.id)}
+        />
+      );
+    }
+    const isCritical = criticalIds.has(node.id);
+    const dimmed = criticalOn && criticalIds.size > 0 && !isCritical;
+    return (
+      <HopCard
+        key={`${node.id}-${i}`}
+        node={node}
+        index={i}
+        defaultExpanded={layout === "nested" && i < 2}
+        accessToken={accessToken}
+        graph={graph}
+        pushTrace={pushTrace}
+        isCritical={isCritical}
+        dimmed={dimmed}
+        muted={false}
+        onStepInto={stepInto}
+        onStepOver={() => stepOver(i)}
+        onStepOut={stepOut}
+        registerRef={(el) => {
+          if (el) hopRefs.current.set(i, el);
+          else hopRefs.current.delete(i);
+        }}
+      />
+    );
+  };
+
+  const noCallChain = rawHops.length <= 1 && !pathTarget;
 
   return (
     <div className="h-full w-full overflow-auto bg-root">
@@ -520,19 +867,30 @@ export default function TraceView({ accessToken }: TraceViewProps) {
               <span>Back</span>
             </button>
           )}
+          {parentId && (
+            <button
+              type="button"
+              onClick={() => setTraceRoot(parentId)}
+              className="text-[11px] font-semibold text-text-muted hover:text-gold transition-colors"
+              title="Re-root at the parent hop"
+            >
+              ⊙ focus parent
+            </button>
+          )}
         </div>
 
-        {/* Breadcrumb */}
-        <div className="flex items-center gap-1 flex-wrap mb-2">
+        {/* Breadcrumb (prominent, clickable) */}
+        <div className="flex items-center gap-1 flex-wrap mb-2 rounded border border-border-subtle/60 bg-surface/40 px-2 py-1.5">
+          <span className="text-[9px] uppercase tracking-wider text-text-muted mr-1">Path</span>
           {breadcrumb.map((n, i) => (
             <span key={`${n.id}-${i}`} className="flex items-center gap-1">
               <button
                 type="button"
                 onClick={() => truncateTrace(i + 1)}
-                className={`text-[11px] truncate max-w-[160px] transition-colors ${
+                className={`text-[11px] truncate max-w-[160px] transition-colors px-1.5 py-0.5 rounded ${
                   i === breadcrumb.length - 1
-                    ? "text-text-primary font-medium"
-                    : "text-text-muted hover:text-gold"
+                    ? "text-text-primary font-semibold bg-accent/10"
+                    : "text-text-muted hover:text-gold hover:bg-elevated"
                 }`}
                 title={n.name}
               >
@@ -543,6 +901,15 @@ export default function TraceView({ accessToken }: TraceViewProps) {
               )}
             </span>
           ))}
+        </div>
+
+        {/* Wave-1 toolbar */}
+        <div className="mb-2">
+          <TraceControls
+            packagesPresent={packagesPresent}
+            searchResults={graph.nodes}
+            onPickPathTarget={(id) => setPathTarget(id)}
+          />
         </div>
 
         <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -556,8 +923,17 @@ export default function TraceView({ accessToken }: TraceViewProps) {
               {focusNode.name}
             </div>
             <div className="text-[11px] text-text-muted">
-              {hops.length} hop{hops.length === 1 ? "" : "s"} · {totalCalls} call
-              {totalCalls === 1 ? "" : "s"}
+              {pathTarget ? (
+                <span>
+                  path mode · {hops.length} hop{hops.length === 1 ? "" : "s"}
+                  {pathHops && pathHops.length === 0 ? " · no path found" : ""}
+                </span>
+              ) : (
+                <span>
+                  {hops.length} hop{hops.length === 1 ? "" : "s"} · {totalCalls} call
+                  {totalCalls === 1 ? "" : "s"} · {direction}
+                </span>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -603,42 +979,109 @@ export default function TraceView({ accessToken }: TraceViewProps) {
         </div>
       </div>
 
-      {/* Body */}
+      {/* Body: minimap rail + trace column */}
       <div className="p-5">
-        {directCalls.length === 0 ? (
-          <div className="max-w-lg mx-auto mt-8 text-center">
-            {/* Still show the focus node itself so the user sees something */}
-            <div className="mb-6 text-left">
-              <HopCard
-                node={focusNode}
-                index={0}
-                defaultExpanded
-                accessToken={accessToken}
-                graph={graph}
-                pushTrace={pushTrace}
+        <div className="max-w-7xl mx-auto flex gap-4">
+          {/* Minimap rail */}
+          {hops.length > 1 && (
+            <div className="hidden lg:block w-52 shrink-0">
+              <Minimap
+                hops={hops}
+                focusId={focusId}
+                criticalIds={criticalIds}
+                onPick={(id) => setTraceRoot(id)}
               />
             </div>
-            <p className="text-text-secondary text-sm">
-              No traced calls from this node — pick a function in an analyzed
-              package (e.g. <span className="font-mono">httpx/</span>,{" "}
-              <span className="font-mono">providers/</span>).
-            </p>
-          </div>
-        ) : (
-          <div className="max-w-6xl mx-auto space-y-3">
-            {hops.map((node, i) => (
-              <HopCard
-                key={`${node.id}-${i}`}
-                node={node}
-                index={i}
-                defaultExpanded={i < 2}
-                accessToken={accessToken}
+          )}
+
+          {/* Trace column */}
+          <div className="flex-1 min-w-0">
+            {pathTarget && pathHops && pathHops.length === 0 ? (
+              <div className="max-w-lg mx-auto mt-8 text-center">
+                <p className="text-text-secondary text-sm">
+                  No call/import path from{" "}
+                  <span className="font-mono">{focusNode.name}</span> to the chosen target.
+                </p>
+              </div>
+            ) : noCallChain && layout === "nested" ? (
+              <div className="max-w-lg mx-auto mt-8 text-center">
+                <div className="mb-6 text-left">{renderHop(focusNode, 0)}</div>
+                <p className="text-text-secondary text-sm">
+                  No traced {direction} from this node — try the other direction, a
+                  deeper depth, or pick a function in an analyzed package.
+                </p>
+              </div>
+            ) : layout === "shape" ? (
+              <ShapeView
+                hops={hops}
                 graph={graph}
-                pushTrace={pushTrace}
+                direction={direction}
+                onPick={(id) => setTraceRoot(id)}
               />
-            ))}
+            ) : layout === "flat" ? (
+              <div className="space-y-2">
+                {hops.map((node, i) => {
+                  const cls = classify(node);
+                  const isCritical = criticalIds.has(node.id);
+                  const dimmed = criticalOn && criticalIds.size > 0 && !isCritical;
+                  if (cls !== "full") {
+                    return (
+                      <FoldedHopRow
+                        key={`${node.id}-${i}`}
+                        node={node}
+                        index={i}
+                        reason={cls === "muted" ? "muted" : "folded"}
+                        onUnfold={() => toggleUnfold(node.id)}
+                      />
+                    );
+                  }
+                  return (
+                    <div
+                      key={`${node.id}-${i}`}
+                      className={`flex items-center gap-2 rounded border px-3 py-2 transition-opacity ${
+                        isCritical ? "border-accent ring-1 ring-accent/40" : "border-border-subtle"
+                      } ${dimmed ? "opacity-40" : ""} bg-elevated/40`}
+                      style={{ marginLeft: `${Math.min(i, 10) * 14}px` }}
+                      ref={(el) => {
+                        if (el) hopRefs.current.set(i, el as unknown as HTMLDivElement);
+                      }}
+                    >
+                      <span className="text-[10px] font-mono text-text-muted shrink-0">{i + 1}</span>
+                      <span
+                        className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded shrink-0"
+                        style={{ color: nodeColorVar(node.type) }}
+                      >
+                        {node.type}
+                      </span>
+                      <span className="text-[12px] font-mono text-text-primary truncate flex-1" title={lineLabel(node)}>
+                        {node.name}
+                      </span>
+                      {isCritical && <span className="text-accent text-[10px] shrink-0">◆</span>}
+                      <button
+                        type="button"
+                        onClick={() => setTraceRoot(node.id)}
+                        className="text-[10px] font-semibold text-gold hover:text-gold-bright shrink-0"
+                        title="Focus this node"
+                      >
+                        ⊙
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => pushTrace(node.id)}
+                        className="text-[10px] font-semibold text-accent hover:text-accent-bright shrink-0"
+                        title="Step into"
+                      >
+                        ↳
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="space-y-3">{hops.map((node, i) => renderHop(node, i))}</div>
+            )}
           </div>
-        )}
+        </div>
       </div>
     </div>
   );
