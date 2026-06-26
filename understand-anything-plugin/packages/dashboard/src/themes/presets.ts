@@ -20,6 +20,7 @@ const LIGHT_ACCENT_SWATCHES: AccentSwatch[] = [
   { id: "amber", name: "Amber", accent: "#9e7a30", accentDim: "#8a6a28", accentBright: "#b5923e" },
   { id: "teal", name: "Teal", accent: "#2e8a7a", accentDim: "#267a6c", accentBright: "#45a595" },
   { id: "slate", name: "Slate", accent: "#5a6570", accentDim: "#4e5860", accentBright: "#6e7a85" },
+  { id: "zed-blue", name: "Zed Blue", accent: "#4078f2", accentDim: "#3568d4", accentBright: "#5a8cf5" },
 ];
 
 export const PRESETS: ThemePreset[] = [
@@ -166,6 +167,35 @@ export const PRESETS: ThemePreset[] = [
       "node-pipeline": "#fb7185",
       "node-schema": "#facc15",
       "node-resource": "#818cf8",
+    },
+  },
+  {
+    id: "zed-light",
+    name: "Zed Light",
+    isDark: false,
+    defaultAccentId: "zed-blue",
+    accentSwatches: LIGHT_ACCENT_SWATCHES,
+    colors: {
+      root: "#fafafa",
+      surface: "#f0f0f0",
+      elevated: "#ffffff",
+      panel: "#f5f5f6",
+      "text-primary": "#383a42",
+      "text-secondary": "#696c77",
+      "text-muted": "#a0a1a7",
+      "node-file": "#4078f2",
+      "node-function": "#50a14f",
+      "node-class": "#a626a4",
+      "node-module": "#c18401",
+      "node-concept": "#e45649",
+      "node-config": "#0184bc",
+      "node-document": "#4078f2",
+      "node-service": "#a626a4",
+      "node-table": "#50a14f",
+      "node-endpoint": "#986801",
+      "node-pipeline": "#e45649",
+      "node-schema": "#c18401",
+      "node-resource": "#4078f2",
     },
   },
 ];

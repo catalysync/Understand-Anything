@@ -268,6 +268,8 @@ export default function NodeInfo() {
   const navigateToHistoryIndex = useDashboardStore((s) => s.navigateToHistoryIndex);
   const setFocusNode = useDashboardStore((s) => s.setFocusNode);
   const openCodeViewer = useDashboardStore((s) => s.openCodeViewer);
+  const setTraceRoot = useDashboardStore((s) => s.setTraceRoot);
+  const setViewMode = useDashboardStore((s) => s.setViewMode);
   const focusNodeId = useDashboardStore((s) => s.focusNodeId);
   const viewMode = useDashboardStore((s) => s.viewMode);
   const domainGraph = useDashboardStore((s) => s.domainGraph);
@@ -383,6 +385,19 @@ export default function NodeInfo() {
       <p className="text-sm text-text-secondary mb-4 leading-relaxed">
         {node.summary}
       </p>
+
+      {/* Flow / Trace entry point */}
+      <button
+        type="button"
+        onClick={() => {
+          setTraceRoot(node.id);
+          setViewMode("trace");
+        }}
+        className="w-full mb-4 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-accent/40 bg-accent/10 text-accent text-sm font-semibold hover:bg-accent/20 hover:text-accent-bright hover:border-accent/60 transition-colors"
+      >
+        <span className="text-xs">▶</span>
+        Trace flow from here
+      </button>
 
       {node.filePath && (
         <div className="text-xs text-text-secondary mb-4 rounded-lg border border-border-subtle bg-elevated/60 p-3">

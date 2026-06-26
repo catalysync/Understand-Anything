@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Highlight, themes } from "prism-react-renderer";
 import { useDashboardStore } from "../store";
 import { useI18n } from "../contexts/I18nContext";
+import CodeBlock from "./CodeBlock";
 
 interface CodeViewerProps {
   accessToken: string;
@@ -67,6 +67,7 @@ export default function CodeViewer({
   const viewMode = useDashboardStore((s) => s.viewMode);
   const codeViewerNodeId = useDashboardStore((s) => s.codeViewerNodeId);
   const closeCodeViewer = useDashboardStore((s) => s.closeCodeViewer);
+  const openCodeViewer = useDashboardStore((s) => s.openCodeViewer);
   const activeGraph = viewMode === "domain" && domainGraph ? domainGraph : graph;
   // Files tab always builds its tree from the structural graph, so a node ID opened from
   // there may not exist in the active (domain) graph — fall back to the structural graph.
@@ -214,43 +215,17 @@ export default function CodeViewer({
               <span>{source.lineCount} {t.codeViewer.linesLabel}</span>
               <span>{formatBytes(source.sizeBytes)}</span>
             </div>
-            <Highlight code={source.content} language={language} theme={themes.vsDark}>
-              {({ className, style, tokens, getLineProps, getTokenProps }) => (
-                <pre
-                  className={`${className} min-w-max p-0 m-0 ${
-                    isModal ? "text-xs leading-5" : "text-[11px] leading-5"
-                  } font-mono`}
-                  style={{ ...style, background: "transparent" }}
-                >
-                  {tokens.map((line, index) => {
-                    const lineNumber = index + 1;
-                    const isHighlighted =
-                      highlightedRange !== null &&
-                      lineNumber >= highlightedRange.start &&
-                      lineNumber <= highlightedRange.end;
-                    const lineProps = getLineProps({ line });
-                    return (
-                      <div
-                        key={lineNumber}
-                        {...lineProps}
-                        className={`${lineProps.className} flex ${
-                          isHighlighted ? "bg-accent/15" : "hover:bg-elevated/40"
-                        }`}
-                      >
-                        <span className="w-12 shrink-0 select-none border-r border-border-subtle pr-3 text-right text-text-muted bg-surface/60">
-                          {lineNumber}
-                        </span>
-                        <span className="pl-3 pr-6 whitespace-pre">
-                          {line.map((token, key) => (
-                            <span key={key} {...getTokenProps({ token })} />
-                          ))}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </pre>
-              )}
-            </Highlight>
+            <CodeBlock
+              code={source.content}
+              language={language}
+              accessToken={accessToken}
+              filePath={node.filePath}
+              highlightedRange={highlightedRange}
+              graph={activeGraph}
+              currentNodeId={node.id}
+              onJumpToNode={(targetId) => openCodeViewer(targetId)}
+              fontSizeClass={isModal ? "text-xs leading-5" : "text-[11px] leading-5"}
+            />
           </>
         )}
       </div>

@@ -1,7 +1,8 @@
 import { useEffect, useState, useMemo, useCallback, lazy, Suspense } from "react";
 import { validateGraph } from "@understand-anything/core/schema";
 import type { GraphIssue } from "@understand-anything/core/schema";
-import { useDashboardStore } from "./store";
+import { useDashboardStore, setWorkspaceToken } from "./store";
+import type { Workspace } from "./store";
 import GraphView from "./components/GraphView";
 import DomainGraphView from "./components/DomainGraphView";
 import KnowledgeGraphView from "./components/KnowledgeGraphView";
@@ -16,6 +17,7 @@ import ProjectOverview from "./components/ProjectOverview";
 import FileExplorer from "./components/FileExplorer";
 import WarningBanner from "./components/WarningBanner";
 import TokenGate from "./components/TokenGate";
+import BookmarksPanel from "./components/BookmarksPanel";
 import MobileLayout from "./components/MobileLayout";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
@@ -27,6 +29,7 @@ import { I18nProvider, useI18n } from "./contexts/I18nContext.tsx";
 
 // Lazy-load heavy / optional components so they ship in separate chunks.
 const CodeViewer = lazy(() => import("./components/CodeViewer"));
+const TraceView = lazy(() => import("./components/TraceView"));
 const LearnPanel = lazy(() => import("./components/LearnPanel"));
 const PathFinderModal = lazy(() => import("./components/PathFinderModal"));
 const KeyboardShortcutsHelp = lazy(
@@ -115,6 +118,21 @@ function Dashboard({ accessToken }: { accessToken: string }) {
   const [graphIssues, setGraphIssues] = useState<GraphIssue[]>([]);
   const [metaTheme, setMetaTheme] = useState<ThemeConfig | null>(null);
   const [outputLanguage, setOutputLanguage] = useState<string | undefined>();
+
+  const loadWorkspace = useDashboardStore((s) => s.loadWorkspace);
+
+  // Load persisted workspace (bookmarks, annotations, node→session map, …)
+  // and register the token used for debounced POST persistence.
+  useEffect(() => {
+    setWorkspaceToken(accessToken);
+    if (accessToken === "__demo__") return;
+    fetch(dataUrl("workspace.json", accessToken))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((ws) => {
+        if (ws && typeof ws === "object") loadWorkspace(ws as Workspace);
+      })
+      .catch(() => {});
+  }, [accessToken, loadWorkspace]);
 
   useEffect(() => {
     fetch(dataUrl("meta.json", accessToken))
@@ -451,22 +469,24 @@ function DashboardContent({
           </h1>
           <div className="w-px h-5 bg-border-subtle hidden sm:block" />
           <PersonaSelector />
-          {graph && !isKnowledgeGraph && domainGraph && (
+          {graph && !isKnowledgeGraph && (
             <>
               <div className="w-px h-5 bg-border-subtle" />
               <div className="flex items-center bg-elevated rounded-lg p-0.5">
-                <button
-                  type="button"
-                  onClick={() => setViewMode("domain")}
-                  title={t.drawer.domain}
-                  className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
-                    viewMode === "domain"
-                      ? "bg-accent/20 text-accent"
-                      : "text-text-muted hover:text-text-secondary"
-                  }`}
-                >
-                  {t.drawer.domain}
-                </button>
+                {domainGraph && (
+                  <button
+                    type="button"
+                    onClick={() => setViewMode("domain")}
+                    title={t.drawer.domain}
+                    className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                      viewMode === "domain"
+                        ? "bg-accent/20 text-accent"
+                        : "text-text-muted hover:text-text-secondary"
+                    }`}
+                  >
+                    {t.drawer.domain}
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setViewMode("structural")}
@@ -478,6 +498,18 @@ function DashboardContent({
                   }`}
                 >
                   {t.drawer.structural}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("trace")}
+                  title="Flow / Trace — follow the call chain from a node"
+                  className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                    viewMode === "trace"
+                      ? "bg-accent/20 text-accent"
+                      : "text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  Trace
                 </button>
               </div>
             </>
@@ -637,7 +669,11 @@ function DashboardContent({
       <div className="flex-1 flex min-h-0 relative">
         {/* Graph area */}
         <div className="flex-1 min-w-0 min-h-0 relative">
-          {viewMode === "knowledge" ? (
+          {viewMode === "trace" ? (
+            <Suspense fallback={null}>
+              <TraceView accessToken={accessToken} />
+            </Suspense>
+          ) : viewMode === "knowledge" ? (
             <KnowledgeGraphView />
           ) : viewMode === "domain" && domainGraph ? (
             <DomainGraphView />
@@ -662,6 +698,9 @@ function DashboardContent({
             </Suspense>
           </div>
         )}
+
+        {/* Bookmarks / Investigation side panel (persisted workspace) */}
+        <BookmarksPanel />
       </div>
 
       {/* Expanded code viewer modal */}

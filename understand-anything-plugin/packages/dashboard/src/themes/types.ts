@@ -3,7 +3,8 @@ export type PresetId =
   | "dark-ocean"
   | "dark-forest"
   | "dark-rose"
-  | "light-minimal";
+  | "light-minimal"
+  | "zed-light";
 
 export interface AccentSwatch {
   id: string;

@@ -14,7 +14,7 @@ export type NavigationLevel = "overview" | "layer-detail";
 export type NodeType = "file" | "function" | "class" | "module" | "concept" | "config" | "document" | "service" | "table" | "endpoint" | "pipeline" | "schema" | "resource" | "domain" | "flow" | "step" | "article" | "entity" | "topic" | "claim" | "source";
 export type Complexity = "simple" | "moderate" | "complex";
 export type EdgeCategory = "structural" | "behavioral" | "data-flow" | "dependencies" | "semantic" | "infrastructure" | "domain" | "knowledge";
-export type ViewMode = "structural" | "domain" | "knowledge";
+export type ViewMode = "structural" | "domain" | "knowledge" | "trace";
 export type DetailLevel = "file" | "class";
 
 export interface FilterState {
@@ -96,6 +96,74 @@ function buildGraphIndexes(graph: KnowledgeGraph): {
 
 /** Maximum number of entries in the sidebar navigation history. */
 const MAX_HISTORY = 50;
+
+// ---------------------------------------------------------------------------
+// Workspace persistence (bookmarks, annotations, node→session map, watches,
+// saved tours). File-based via /workspace.json. createdAt is stamped server-side.
+// ---------------------------------------------------------------------------
+
+export interface Bookmark {
+  id: string;
+  nodeId: string;
+  label?: string;
+  note?: string;
+  createdAt?: string;
+}
+export interface Annotation {
+  id: string;
+  nodeId: string;
+  lineRange: [number, number] | null;
+  text: string;
+  createdAt?: string;
+}
+export interface SavedTour {
+  id: string;
+  name: string;
+  hopIds: string[];
+  createdAt?: string;
+}
+export interface Workspace {
+  version: number;
+  bookmarks: Bookmark[];
+  annotations: Annotation[];
+  sessions: Record<string, string>;
+  watches: string[];
+  tours: SavedTour[];
+}
+
+export const EMPTY_WORKSPACE: Workspace = {
+  version: 1,
+  bookmarks: [],
+  annotations: [],
+  sessions: {},
+  watches: [],
+  tours: [],
+};
+
+function genId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+let workspaceToken: string | null = null;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Set the access token used for workspace GET/POST. Called once on load. */
+export function setWorkspaceToken(token: string) {
+  workspaceToken = token;
+}
+
+/** Debounced POST of the whole workspace object to /workspace.json. */
+function schedulePersist(workspace: Workspace) {
+  if (!workspaceToken || workspaceToken === "__demo__") return;
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    void fetch(`/workspace.json?token=${encodeURIComponent(workspaceToken!)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(workspace),
+    }).catch(() => {});
+  }, 500);
+}
 
 interface DashboardStore {
   graph: KnowledgeGraph | null;
@@ -193,6 +261,35 @@ interface DashboardStore {
   isKnowledgeGraph: boolean;
   domainGraph: KnowledgeGraph | null;
   activeDomainId: string | null;
+
+  // Flow / Trace view: walk a call chain starting from a root node.
+  // traceRoot is the originally-selected node; traceStack is the breadcrumb
+  // of descended node ids (always starts with [traceRoot]). The focus node
+  // (the one whose call chain is rendered) is the last id in traceStack.
+  traceRoot: string | null;
+  traceStack: string[];
+  setTraceRoot: (id: string) => void;
+  pushTrace: (id: string) => void;
+  popTrace: () => void;
+  /** Truncate the trace breadcrumb to the first `length` entries (>=1). */
+  truncateTrace: (length: number) => void;
+
+  // Workspace persistence
+  workspace: Workspace;
+  workspaceLoaded: boolean;
+  bookmarksPanelOpen: boolean;
+  toggleBookmarksPanel: () => void;
+  loadWorkspace: (ws: Workspace) => void;
+  toggleBookmark: (nodeId: string, label?: string) => void;
+  isBookmarked: (nodeId: string) => boolean;
+  addAnnotation: (nodeId: string, text: string, lineRange?: [number, number] | null) => void;
+  removeAnnotation: (id: string) => void;
+  setNodeSession: (nodeId: string, sessionId: string) => void;
+  getNodeSession: (nodeId: string) => string | undefined;
+  addWatch: (symbol: string) => void;
+  removeWatch: (symbol: string) => void;
+  saveTour: (name: string, hopIds: string[]) => void;
+  removeTour: (id: string) => void;
 
   setDomainGraph: (graph: KnowledgeGraph) => void;
   setViewMode: (mode: ViewMode) => void;
@@ -673,6 +770,119 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   isKnowledgeGraph: false,
   domainGraph: null,
   activeDomainId: null,
+
+  traceRoot: null,
+  traceStack: [],
+  setTraceRoot: (id) => set({ traceRoot: id, traceStack: [id] }),
+  pushTrace: (id) =>
+    set((state) => {
+      // Avoid pushing a duplicate of the current focus node.
+      if (state.traceStack[state.traceStack.length - 1] === id) return {};
+      return { traceStack: [...state.traceStack, id] };
+    }),
+  popTrace: () =>
+    set((state) => {
+      if (state.traceStack.length <= 1) return {};
+      return { traceStack: state.traceStack.slice(0, -1) };
+    }),
+  truncateTrace: (length) =>
+    set((state) => {
+      const n = Math.max(1, Math.min(length, state.traceStack.length));
+      if (n === state.traceStack.length) return {};
+      return { traceStack: state.traceStack.slice(0, n) };
+    }),
+
+  // ---- Workspace persistence -------------------------------------------
+  workspace: EMPTY_WORKSPACE,
+  workspaceLoaded: false,
+  bookmarksPanelOpen: false,
+  toggleBookmarksPanel: () => set((s) => ({ bookmarksPanelOpen: !s.bookmarksPanelOpen })),
+
+  loadWorkspace: (ws) =>
+    set({ workspace: { ...EMPTY_WORKSPACE, ...ws }, workspaceLoaded: true }),
+
+  toggleBookmark: (nodeId, label) =>
+    set((state) => {
+      const exists = state.workspace.bookmarks.some((b) => b.nodeId === nodeId);
+      const bookmarks = exists
+        ? state.workspace.bookmarks.filter((b) => b.nodeId !== nodeId)
+        : [
+            ...state.workspace.bookmarks,
+            { id: genId("bm"), nodeId, label, createdAt: new Date().toISOString() },
+          ];
+      const workspace = { ...state.workspace, bookmarks };
+      schedulePersist(workspace);
+      return { workspace };
+    }),
+
+  isBookmarked: (nodeId) => get().workspace.bookmarks.some((b) => b.nodeId === nodeId),
+
+  addAnnotation: (nodeId, text, lineRange = null) =>
+    set((state) => {
+      const annotations = [
+        ...state.workspace.annotations,
+        { id: genId("an"), nodeId, lineRange, text, createdAt: new Date().toISOString() },
+      ];
+      const workspace = { ...state.workspace, annotations };
+      schedulePersist(workspace);
+      return { workspace };
+    }),
+
+  removeAnnotation: (id) =>
+    set((state) => {
+      const annotations = state.workspace.annotations.filter((a) => a.id !== id);
+      const workspace = { ...state.workspace, annotations };
+      schedulePersist(workspace);
+      return { workspace };
+    }),
+
+  setNodeSession: (nodeId, sessionId) =>
+    set((state) => {
+      if (state.workspace.sessions[nodeId] === sessionId) return {};
+      const sessions = { ...state.workspace.sessions, [nodeId]: sessionId };
+      const workspace = { ...state.workspace, sessions };
+      schedulePersist(workspace);
+      return { workspace };
+    }),
+
+  getNodeSession: (nodeId) => get().workspace.sessions[nodeId],
+
+  addWatch: (symbol) =>
+    set((state) => {
+      if (state.workspace.watches.includes(symbol)) return {};
+      const workspace = { ...state.workspace, watches: [...state.workspace.watches, symbol] };
+      schedulePersist(workspace);
+      return { workspace };
+    }),
+
+  removeWatch: (symbol) =>
+    set((state) => {
+      const workspace = {
+        ...state.workspace,
+        watches: state.workspace.watches.filter((w) => w !== symbol),
+      };
+      schedulePersist(workspace);
+      return { workspace };
+    }),
+
+  saveTour: (name, hopIds) =>
+    set((state) => {
+      const tours = [
+        ...state.workspace.tours,
+        { id: genId("tour"), name, hopIds, createdAt: new Date().toISOString() },
+      ];
+      const workspace = { ...state.workspace, tours };
+      schedulePersist(workspace);
+      return { workspace };
+    }),
+
+  removeTour: (id) =>
+    set((state) => {
+      const tours = state.workspace.tours.filter((t) => t.id !== id);
+      const workspace = { ...state.workspace, tours };
+      schedulePersist(workspace);
+      return { workspace };
+    }),
 
   setDomainGraph: (graph) => {
     set({ domainGraph: graph });
