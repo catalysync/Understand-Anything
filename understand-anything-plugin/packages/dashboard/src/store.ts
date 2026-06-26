@@ -304,6 +304,28 @@ interface DashboardStore {
   tracePathTarget: string | null;
   setPathTarget: (id: string | null) => void;
 
+  // ---- Wave-3 interactive-debugging UI state ---------------------------
+  /** Feature 26: conditional-highlight predicate string (empty = off). */
+  tracePredicate: string;
+  setPredicate: (p: string) => void;
+  /** Feature 26: when true, hide non-matching hops instead of just ringing. */
+  tracePredicateFilter: boolean;
+  togglePredicateFilter: () => void;
+  /** Feature 27: error-path highlight toggle. */
+  traceErrorPath: boolean;
+  toggleErrorPath: () => void;
+  /** Feature 28: complexity heat overlay toggle. */
+  traceHeat: boolean;
+  toggleHeat: () => void;
+  /** Feature 30: in-app trace snapshots (session-scoped; NOT persisted —
+   *  the server workspace whitelist drops unknown keys). id → ordered hop ids. */
+  traceSnapshots: { id: string; name: string; ids: string[]; createdAt: string }[];
+  /** Feature 30: which snapshot is the active diff baseline (null = off). */
+  traceDiffBaseline: string | null;
+  snapshotTrace: (name: string, ids: string[]) => string;
+  removeSnapshot: (id: string) => void;
+  setDiffBaseline: (id: string | null) => void;
+
   /** Wave-2: fuzzy symbol palette (⌘K / ⌘P) open state. */
   symbolPaletteOpen: boolean;
   toggleSymbolPalette: () => void;
@@ -875,6 +897,36 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   toggleCriticalPath: () => set((s) => ({ traceCriticalPath: !s.traceCriticalPath })),
   tracePathTarget: null,
   setPathTarget: (id) => set({ tracePathTarget: id }),
+
+  // ---- Wave-3 interactive-debugging UI state ---------------------------
+  tracePredicate: "",
+  setPredicate: (p) => set({ tracePredicate: p }),
+  tracePredicateFilter: false,
+  togglePredicateFilter: () => set((s) => ({ tracePredicateFilter: !s.tracePredicateFilter })),
+  traceErrorPath: false,
+  toggleErrorPath: () => set((s) => ({ traceErrorPath: !s.traceErrorPath })),
+  traceHeat: false,
+  toggleHeat: () => set((s) => ({ traceHeat: !s.traceHeat })),
+  traceSnapshots: [],
+  traceDiffBaseline: null,
+  snapshotTrace: (name, ids) => {
+    const id = genId("snap");
+    set((s) => ({
+      traceSnapshots: [
+        ...s.traceSnapshots,
+        { id, name, ids, createdAt: new Date().toISOString() },
+      ],
+      // Auto-arm the diff baseline to the just-captured snapshot.
+      traceDiffBaseline: id,
+    }));
+    return id;
+  },
+  removeSnapshot: (id) =>
+    set((s) => ({
+      traceSnapshots: s.traceSnapshots.filter((sn) => sn.id !== id),
+      traceDiffBaseline: s.traceDiffBaseline === id ? null : s.traceDiffBaseline,
+    })),
+  setDiffBaseline: (id) => set({ traceDiffBaseline: id }),
 
   // ---- Wave-2: symbol palette + trace-from-anywhere --------------------
   symbolPaletteOpen: false,

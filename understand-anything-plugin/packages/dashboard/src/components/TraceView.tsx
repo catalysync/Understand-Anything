@@ -26,6 +26,21 @@ import {
 } from "./traceGraph";
 import ReferencesPanel from "./ReferencesPanel";
 import HoverPopover, { type HoverTarget } from "./HoverPopover";
+import {
+  watchHitsInSource,
+  findAssignmentInSlice,
+  parseScope,
+  parsePredicate,
+  hopMatchesPredicate,
+  detectErrorHandling,
+  looksLikeErrorNode,
+  heatValue,
+  heatColor,
+  controlFlowOutline,
+  diffTraceIds,
+  type DiffStatus,
+} from "./traceDebug";
+import { callCountOf } from "./traceGraph";
 import type { GraphNode, KnowledgeGraph } from "@understand-anything/core/types";
 
 interface TraceViewProps {
@@ -140,6 +155,7 @@ function HopCode({
   state,
   inlayHints,
   onPeekNode,
+  flashLine,
 }: {
   node: GraphNode;
   accessToken: string;
@@ -148,6 +164,7 @@ function HopCode({
   state: SourceState;
   inlayHints: boolean;
   onPeekNode: (id: string) => void;
+  flashLine?: number | null;
 }) {
   const range = node.lineRange ? { start: node.lineRange[0], end: node.lineRange[1] } : null;
   const language = state.source?.language ?? fallbackLanguage(node.filePath);
@@ -167,15 +184,26 @@ function HopCode({
 
   const windowStart = range ? Math.max(1, range.start - 8) : undefined;
   const windowEnd = range ? range.end + 12 : undefined;
+  // Feature 22: when a "where set" jump is active, tighten the highlight to that
+  // single line so the assignment stands out within the hop's source.
+  const effectiveRange = flashLine != null ? { start: flashLine, end: flashLine } : range;
 
   return (
     <div className="max-h-[70vh] overflow-auto bg-root">
+      {flashLine != null && (
+        <div
+          data-testid="where-set-flash"
+          className="px-3 py-1.5 text-[11px] text-accent bg-accent/10 border-b border-accent/30 font-mono"
+        >
+          ↩ heuristic dataflow — assignment near line {flashLine} highlighted (regex, not SSA)
+        </div>
+      )}
       <CodeBlock
         code={source.content}
         language={language}
         accessToken={accessToken}
         filePath={node.filePath}
-        highlightedRange={range}
+        highlightedRange={effectiveRange}
         windowStart={windowStart}
         windowEnd={windowEnd}
         graph={graph}
@@ -258,6 +286,117 @@ function PeekDefinition({
   );
 }
 
+/** Feature 23: per-hop scope inspector (static). Params / locals / captured / return. */
+function ScopeInspector({ sourceSlice }: { sourceSlice: string }) {
+  const scope = useMemo(() => parseScope(sourceSlice), [sourceSlice]);
+  const Chip = ({ label, color }: { label: string; color: string }) => (
+    <span
+      className="text-[11px] font-mono px-1.5 py-0.5 rounded border"
+      style={{ color, borderColor: `color-mix(in srgb, ${color} 35%, transparent)` }}
+    >
+      {label}
+    </span>
+  );
+  return (
+    <div className="px-3 py-2.5 border-t border-border-subtle bg-surface/40" data-testid="scope-inspector">
+      <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5">
+        Scope inspector <span className="opacity-60">(static)</span>
+      </div>
+      {scope.signature && (
+        <div className="text-[11px] font-mono text-text-secondary mb-2 truncate" title={scope.signature}>
+          {scope.signature}
+        </div>
+      )}
+      <div className="space-y-1.5">
+        <div className="flex items-start gap-2 flex-wrap">
+          <span className="text-[10px] uppercase tracking-wider text-text-muted w-16 shrink-0 mt-0.5">params</span>
+          {scope.params.length > 0 ? (
+            scope.params.map((p) => <Chip key={p} label={p} color="var(--color-node-endpoint)" />)
+          ) : (
+            <span className="text-[11px] text-text-muted">—</span>
+          )}
+        </div>
+        <div className="flex items-start gap-2 flex-wrap">
+          <span className="text-[10px] uppercase tracking-wider text-text-muted w-16 shrink-0 mt-0.5">locals</span>
+          {scope.locals.length > 0 ? (
+            scope.locals.map((l) => <Chip key={l} label={l} color="var(--color-node-function)" />)
+          ) : (
+            <span className="text-[11px] text-text-muted">—</span>
+          )}
+        </div>
+        <div className="flex items-start gap-2 flex-wrap">
+          <span className="text-[10px] uppercase tracking-wider text-text-muted w-16 shrink-0 mt-0.5">returns</span>
+          {scope.returns ? (
+            <Chip label={scope.returns} color="var(--color-node-schema)" />
+          ) : (
+            <span className="text-[11px] text-text-muted">—</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Feature 29: control-flow mini-diagram — nested structural outline (heuristic). */
+function ControlFlowOutlinePanel({
+  sourceSlice,
+  sliceStart,
+}: {
+  sourceSlice: string;
+  sliceStart: number;
+}) {
+  const nodes = useMemo(() => controlFlowOutline(sourceSlice, sliceStart), [sourceSlice, sliceStart]);
+  const kindColor: Record<string, string> = {
+    if: "var(--color-node-endpoint)",
+    "else if": "var(--color-node-endpoint)",
+    else: "var(--color-node-endpoint)",
+    for: "var(--color-node-pipeline)",
+    switch: "var(--color-node-class)",
+    select: "var(--color-node-class)",
+    case: "var(--color-node-class)",
+    defer: "var(--color-gold, #d4a843)",
+    go: "var(--color-gold, #d4a843)",
+    return: "var(--color-node-schema)",
+  };
+  return (
+    <div
+      className="px-3 py-2.5 border-t border-border-subtle bg-surface/40"
+      data-testid="control-flow-outline"
+    >
+      <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5">
+        Control-flow outline <span className="opacity-60">(structural outline · brace-depth heuristic)</span>
+      </div>
+      {nodes.length === 0 ? (
+        <div className="text-[11px] text-text-muted">No control structures detected.</div>
+      ) : (
+        <div className="space-y-0.5 font-mono">
+          {nodes.map((n, i) => {
+            const color = kindColor[n.kind] ?? "var(--color-text-muted)";
+            return (
+              <div
+                key={`${n.line}-${i}`}
+                className="text-[11px] flex items-center gap-1.5 leading-5"
+                style={{ paddingLeft: `${n.depth * 14}px` }}
+              >
+                <span className="text-text-muted/50">{n.depth > 0 ? "└" : ""}</span>
+                <span
+                  className="uppercase text-[9px] font-semibold px-1 py-0.5 rounded shrink-0"
+                  style={{ color, backgroundColor: `color-mix(in srgb, ${color} 12%, transparent)` }}
+                >
+                  {n.kind}
+                </span>
+                <span className="text-text-secondary truncate" title={`${n.text} :${n.line}`}>
+                  {n.text}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Thin one-line row for a folded or muted hop. */
 function FoldedHopRow({
   node,
@@ -313,6 +452,13 @@ function HopCard({
   onStepOver,
   onStepOut,
   registerRef,
+  watches,
+  onReportMeta,
+  heatOn,
+  errorPathOn,
+  predicateMatch,
+  diffStatus,
+  scrollToLine,
 }: {
   node: GraphNode;
   index: number;
@@ -327,6 +473,13 @@ function HopCard({
   onStepOver: () => void;
   onStepOut: () => void;
   registerRef?: (el: HTMLDivElement | null) => void;
+  watches: string[];
+  onReportMeta: (id: string, meta: { isError: boolean; watchHits: number }) => void;
+  heatOn: boolean;
+  errorPathOn: boolean;
+  predicateMatch: boolean | null;
+  diffStatus: DiffStatus | null;
+  scrollToLine: number | null;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [showCallers, setShowCallers] = useState(false);
@@ -375,8 +528,61 @@ function HopCard({
   );
   const addAnnotation = useDashboardStore((s) => s.addAnnotation);
   const removeAnnotation = useDashboardStore((s) => s.removeAnnotation);
+  const addWatch = useDashboardStore((s) => s.addWatch);
   const [noteDraft, setNoteDraft] = useState("");
   const [noteOpen, setNoteOpen] = useState(false);
+  const [showScope, setShowScope] = useState(false);
+  const [showCfg, setShowCfg] = useState(false);
+
+  // ---- Wave-3 per-hop debug metadata (heuristic, from the source slice) ----
+  const sliceStart = node.lineRange ? Math.max(1, node.lineRange[0]) : 1;
+  const errorInfo = useMemo(() => detectErrorHandling(sourceSlice), [sourceSlice]);
+  // Fallback to a name/summary heuristic when source hasn't loaded.
+  const isError = errorInfo.isError || (!sourceSlice && looksLikeErrorNode(node));
+  const watchHits = useMemo(() => {
+    let total = 0;
+    for (const w of watches) total += watchHitsInSource(w, sourceSlice);
+    return total;
+  }, [watches, sourceSlice]);
+  // The first watched symbol that actually appears in this hop (for "where set").
+  const activeWatch = useMemo(
+    () => watches.find((w) => watchHitsInSource(w, sourceSlice) > 0) ?? null,
+    [watches, sourceSlice],
+  );
+  const whereSet = useMemo(
+    () => (activeWatch ? findAssignmentInSlice(activeWatch, sourceSlice, sliceStart) : null),
+    [activeWatch, sourceSlice, sliceStart],
+  );
+  const fanIn = useMemo(() => callCountOf(graph, node.id), [graph, node.id]);
+  const heat = useMemo(() => heatValue(node, fanIn), [node, fanIn]);
+  // Imperatively scroll the source into view + highlight a line when requested.
+  const [highlightLine, setHighlightLine] = useState<number | null>(null);
+
+  // Report this hop's error / watch status up so the parent can style the
+  // error path and minimap (and so predicate `returns error` can match).
+  useEffect(() => {
+    onReportMeta(node.id, { isError, watchHits });
+  }, [node.id, isError, watchHits, onReportMeta]);
+
+  // External request (from "where set" / watch jump) to reveal a line. A
+  // non-positive line means "just expand + scroll" (no specific line to flash).
+  useEffect(() => {
+    if (scrollToLine != null) {
+      setExpanded(true);
+      if (scrollToLine > 0) {
+        setHighlightLine(scrollToLine);
+        const t = window.setTimeout(() => setHighlightLine(null), 2600);
+        return () => window.clearTimeout(t);
+      }
+    }
+  }, [scrollToLine]);
+
+  const jumpToWhereSet = () => {
+    if (!whereSet) return;
+    setExpanded(true);
+    setHighlightLine(whereSet.line);
+    window.setTimeout(() => setHighlightLine(null), 2600);
+  };
 
   const teachGo = () => {
     if (!node.filePath || !node.lineRange) return;
@@ -385,19 +591,41 @@ function HopCard({
 
   const totalCallees = bundles.reduce((acc, b) => acc + b.nodes.length, 0);
 
+  // Wave-3 compositing of the card's outline + emphasis. Different toggles
+  // compose: error-path dims non-error hops; predicate filter/ring; diff colors;
+  // heat tints the left dot; critical-path ring stays (different concern).
+  const errorDim = errorPathOn && !isError;
+  const predicateDim = predicateMatch === false; // explicit non-match
+  const dimAll = dimmed || errorDim || predicateDim;
+  const diffRing =
+    diffStatus === "added"
+      ? "ring-1 ring-[rgb(74,222,128)] border-[rgb(74,222,128)]"
+      : diffStatus === "moved"
+        ? "ring-1 ring-[rgb(251,191,36)] border-[rgb(251,191,36)]"
+        : "";
+  const predicateRing = predicateMatch === true ? "ring-2 ring-accent border-accent" : "";
+  const errorRing = errorPathOn && isError ? "ring-1 ring-[rgb(248,113,113)] border-[rgb(248,113,113)]" : "";
+  const dotColor = heatOn ? heatColor(heat) : color;
+
   return (
-    <div className={`relative pl-6 transition-opacity ${dimmed ? "opacity-40" : ""}`} ref={registerRef}>
+    <div className={`relative pl-6 transition-opacity ${dimAll ? "opacity-40" : ""}`} ref={registerRef}>
       {/* Connector rail */}
       <div className="absolute left-2 top-0 bottom-0 w-px bg-border-subtle" />
       <div
         className="absolute left-[3px] top-4 w-2.5 h-2.5 rounded-full border-2"
-        style={{ borderColor: color, backgroundColor: "var(--color-surface, #1a1a1a)" }}
+        style={{ borderColor: dotColor, backgroundColor: heatOn ? dotColor : "var(--color-surface, #1a1a1a)" }}
+        title={heatOn ? `complexity heat: ${node.complexity ?? "?"} (${Math.round(heat * 100)})` : undefined}
       />
 
       <div
+        data-testid="hop-card"
+        data-error={isError ? "1" : "0"}
+        data-watch-hits={watchHits}
         className={`rounded-lg border bg-elevated/60 overflow-hidden ${
-          isCritical ? "border-accent ring-1 ring-accent/50" : "border-border-subtle"
+          predicateRing || diffRing || errorRing ||
+          (isCritical ? "border-accent ring-1 ring-accent/50" : "border-border-subtle")
         }`}
+        style={heatOn ? { boxShadow: `inset 4px 0 0 ${heatColor(heat)}` } : undefined}
       >
         {/* Header */}
         <div className="px-3 py-2.5 flex items-start gap-2">
@@ -427,6 +655,34 @@ function HopCard({
                   title={`Go concurrency detected (heuristic): ${concurrency.markers.join(", ")}`}
                 >
                   ⇄ concurrency
+                </span>
+              )}
+              {watchHits > 0 && (
+                <span
+                  data-testid="watch-badge"
+                  className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-accent/50 text-accent bg-accent/10 shrink-0"
+                  title={`Reads/writes/calls a watched symbol ${watchHits}× (heuristic)`}
+                >
+                  👁 {watchHits}
+                </span>
+              )}
+              {errorPathOn && isError && (
+                <span
+                  data-testid="error-badge"
+                  className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-[rgb(248,113,113)]/60 text-[rgb(248,113,113)] bg-[rgb(248,113,113)]/10 shrink-0"
+                  title={`Error handling detected (heuristic): ${errorInfo.markers.join(", ") || "name/summary match"}`}
+                >
+                  ✦ error
+                </span>
+              )}
+              {diffStatus === "added" && (
+                <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-[rgb(74,222,128)]/60 text-[rgb(74,222,128)] bg-[rgb(74,222,128)]/10 shrink-0" title="Added vs snapshot">
+                  + added
+                </span>
+              )}
+              {diffStatus === "moved" && (
+                <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-[rgb(251,191,36)]/60 text-[rgb(251,191,36)] bg-[rgb(251,191,36)]/10 shrink-0" title="Moved vs snapshot">
+                  ↕ moved
                 </span>
               )}
             </div>
@@ -582,6 +838,52 @@ function HopCard({
               ◆ go to interface
             </button>
           )}
+          {/* Feature 21: watch this symbol */}
+          <button
+            type="button"
+            data-testid="watch-button"
+            onClick={() => addWatch(node.name)}
+            className="text-[10px] font-semibold px-2 py-1 rounded border border-border-subtle text-text-muted hover:text-accent hover:border-accent/60 transition-colors"
+            title={`Watch "${node.name}" — badge every hop whose source reads/writes/calls it`}
+          >
+            👁 watch
+          </button>
+          {/* Feature 22: jump to where a watched symbol was set (heuristic dataflow) */}
+          {whereSet && activeWatch && (
+            <button
+              type="button"
+              data-testid="where-set-button"
+              onClick={jumpToWhereSet}
+              className="text-[10px] font-semibold px-2 py-1 rounded border border-accent/40 text-accent hover:text-accent-bright hover:border-accent/70 transition-colors"
+              title={`Heuristic dataflow: ${activeWatch} ${whereSet.kind} at line ${whereSet.line} — "${whereSet.text}"`}
+            >
+              ↩ where set ({activeWatch})
+            </button>
+          )}
+          {/* Feature 23: scope inspector */}
+          <button
+            type="button"
+            data-testid="scope-button"
+            onClick={() => setShowScope((v) => !v)}
+            className={`text-[10px] font-semibold px-2 py-1 rounded border transition-colors ${
+              showScope ? "border-node-endpoint/60 text-node-endpoint bg-node-endpoint/10" : "border-border-subtle text-text-muted hover:text-text-primary"
+            }`}
+            title="Scope inspector — params, locals, return (static)"
+          >
+            ⊞ scope
+          </button>
+          {/* Feature 29: control-flow outline */}
+          <button
+            type="button"
+            data-testid="cfg-button"
+            onClick={() => setShowCfg((v) => !v)}
+            className={`text-[10px] font-semibold px-2 py-1 rounded border transition-colors ${
+              showCfg ? "border-node-pipeline/60 text-node-pipeline bg-node-pipeline/10" : "border-border-subtle text-text-muted hover:text-text-primary"
+            }`}
+            title="Control-flow mini-diagram — nested structural outline (heuristic)"
+          >
+            ⑂ control-flow
+          </button>
         </div>
 
         {/* Feature 14: implementations expander */}
@@ -739,6 +1041,14 @@ function HopCard({
           )}
         </div>
 
+        {/* Feature 23: scope inspector (static) */}
+        {showScope && sourceSlice && <ScopeInspector sourceSlice={sourceSlice} />}
+
+        {/* Feature 29: control-flow outline (structural) */}
+        {showCfg && sourceSlice && (
+          <ControlFlowOutlinePanel sourceSlice={sourceSlice} sliceStart={sliceStart} />
+        )}
+
         {expanded && (
           <div className="border-t border-border-subtle">
             <HopCode
@@ -749,6 +1059,7 @@ function HopCard({
               state={hopSource}
               inlayHints
               onPeekNode={(id) => setPeekId((cur) => (cur === id ? null : id))}
+              flashLine={highlightLine}
             />
           </div>
         )}
@@ -988,6 +1299,240 @@ function ShapeView({
   );
 }
 
+/** Feature 21: Watches panel — list watched symbols, remove, jump-to-next. */
+function WatchesPanel({
+  watches,
+  hitCounts,
+  onRemove,
+  onJumpNext,
+}: {
+  watches: string[];
+  hitCounts: Record<string, number>;
+  onRemove: (sym: string) => void;
+  onJumpNext: (sym: string) => void;
+}) {
+  if (watches.length === 0) return null;
+  return (
+    <div
+      data-testid="watches-panel"
+      className="rounded-lg border border-accent/30 bg-surface/60 p-2.5"
+    >
+      <div className="text-[10px] uppercase tracking-wider text-accent mb-1.5">
+        👁 Watches ({watches.length}) — persists in workspace
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {watches.map((w) => (
+          <span
+            key={w}
+            className="inline-flex items-stretch rounded border border-accent/30 overflow-hidden"
+          >
+            <button
+              type="button"
+              data-testid="watch-jump"
+              onClick={() => onJumpNext(w)}
+              className="text-[11px] font-mono px-2 py-1 text-accent hover:bg-accent/10 transition-colors"
+              title={`Jump to next hop that touches ${w}`}
+            >
+              {w}
+              <span className="ml-1.5 text-[9px] text-text-muted">
+                {hitCounts[w] ?? 0} hop{(hitCounts[w] ?? 0) === 1 ? "" : "s"} ↦
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onRemove(w)}
+              className="text-[10px] px-1.5 py-1 text-text-muted hover:text-node-concept border-l border-accent/30 transition-colors"
+              title={`Stop watching ${w}`}
+            >
+              ✕
+            </button>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Feature 26/27/28/30: the Wave-3 debug toolbar (predicate + toggles + diff). */
+function DebugBar({
+  errorPathHopCount,
+  onExplainErrorPath,
+  explainState,
+  explainPanel,
+}: {
+  errorPathHopCount: number;
+  onExplainErrorPath: () => void;
+  explainState: "idle" | "loading" | "loaded" | "error";
+  explainPanel: React.ReactNode;
+}) {
+  const predicate = useDashboardStore((s) => s.tracePredicate);
+  const setPredicate = useDashboardStore((s) => s.setPredicate);
+  const predicateFilter = useDashboardStore((s) => s.tracePredicateFilter);
+  const togglePredicateFilter = useDashboardStore((s) => s.togglePredicateFilter);
+  const errorPath = useDashboardStore((s) => s.traceErrorPath);
+  const toggleErrorPath = useDashboardStore((s) => s.toggleErrorPath);
+  const heat = useDashboardStore((s) => s.traceHeat);
+  const toggleHeat = useDashboardStore((s) => s.toggleHeat);
+  const snapshots = useDashboardStore((s) => s.traceSnapshots);
+  const diffBaseline = useDashboardStore((s) => s.traceDiffBaseline);
+  const setDiffBaseline = useDashboardStore((s) => s.setDiffBaseline);
+  const removeSnapshot = useDashboardStore((s) => s.removeSnapshot);
+
+  const [draft, setDraft] = useState(predicate);
+
+  const btn =
+    "text-[10px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded border transition-colors";
+  const idle = "border-border-subtle text-text-muted hover:text-text-primary hover:border-border-medium";
+  const active = "border-accent/60 text-accent bg-accent/10";
+
+  return (
+    <div className="flex flex-col gap-2" data-testid="debug-bar">
+      <div className="flex items-center gap-2 flex-wrap">
+        {/* Feature 26: predicate bar */}
+        <div className="flex items-center gap-1.5 px-2 py-1 rounded border border-border-subtle">
+          <span className="text-[10px] uppercase tracking-wider text-text-muted">Highlight</span>
+          <input
+            type="text"
+            data-testid="predicate-input"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") setPredicate(draft.trim());
+            }}
+            onBlur={() => setPredicate(draft.trim())}
+            placeholder="returns error · package:X · calls:Y · name:~re · complexity:complex"
+            className="bg-surface text-text-primary text-[11px] rounded px-2 py-1 border border-border-subtle focus:outline-none focus:border-accent/50 placeholder-text-muted w-[300px]"
+          />
+          {predicate && (
+            <button
+              type="button"
+              onClick={() => {
+                setPredicate("");
+                setDraft("");
+              }}
+              className="text-[10px] text-text-muted hover:text-node-concept"
+              title="Clear predicate"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+        {predicate && (
+          <button
+            type="button"
+            data-testid="predicate-filter"
+            onClick={togglePredicateFilter}
+            className={`${btn} ${predicateFilter ? active : idle}`}
+            title="Filter to only matching hops"
+          >
+            ⧂ filter to matches
+          </button>
+        )}
+
+        {/* Feature 27: error path */}
+        <button
+          type="button"
+          data-testid="error-path-toggle"
+          onClick={toggleErrorPath}
+          className={`${btn} ${errorPath ? "border-[rgb(248,113,113)]/60 text-[rgb(248,113,113)] bg-[rgb(248,113,113)]/10" : idle}`}
+          title="Highlight the error-handling path (heuristic: if err != nil, return …err, errors.Wrap)"
+        >
+          ✦ Error path{errorPath && errorPathHopCount > 0 ? ` (${errorPathHopCount})` : ""}
+        </button>
+
+        {/* Feature 28: complexity heat */}
+        <button
+          type="button"
+          data-testid="heat-toggle"
+          onClick={toggleHeat}
+          className={`${btn} ${heat ? active : idle}`}
+          title="Color hops by complexity (green→amber→red), fallback LOC/fan-in"
+        >
+          ◐ Heat
+        </button>
+
+        {/* Feature 30: snapshot + diff */}
+        {diffBaseline && (
+          <button
+            type="button"
+            data-testid="diff-clear"
+            onClick={() => setDiffBaseline(null)}
+            className={`${btn} ${active}`}
+            title="Stop diffing"
+          >
+            ✕ clear diff
+          </button>
+        )}
+      </div>
+
+      {/* Heat legend */}
+      {heat && (
+        <div className="flex items-center gap-2 text-[10px] text-text-muted" data-testid="heat-legend">
+          <span className="uppercase tracking-wider">Heat</span>
+          <span className="inline-block w-32 h-2 rounded" style={{ background: `linear-gradient(90deg, ${heatColor(0.1)}, ${heatColor(0.5)}, ${heatColor(0.95)})` }} />
+          <span>simple</span>
+          <span className="opacity-50">→</span>
+          <span>complex</span>
+          <span className="opacity-60">(by complexity · fallback LOC/fan-in)</span>
+        </div>
+      )}
+
+      {/* Snapshots list (feature 30) */}
+      {snapshots.length > 0 && (
+        <div className="flex items-center gap-2 flex-wrap" data-testid="snapshots-list">
+          <span className="text-[10px] uppercase tracking-wider text-text-muted">Snapshots</span>
+          {snapshots.map((sn) => {
+            const armed = diffBaseline === sn.id;
+            return (
+              <span key={sn.id} className="inline-flex items-stretch rounded border border-border-subtle overflow-hidden">
+                <button
+                  type="button"
+                  data-testid="snapshot-diff"
+                  onClick={() => setDiffBaseline(armed ? null : sn.id)}
+                  className={`text-[10px] font-mono px-2 py-1 transition-colors ${
+                    armed ? "bg-accent/15 text-accent" : "text-text-muted hover:text-text-primary"
+                  }`}
+                  title={`${armed ? "Diffing against" : "Diff vs"} "${sn.name}" (${sn.ids.length} hops, ${sn.createdAt.slice(11, 19)})`}
+                >
+                  {armed ? "◉ " : "○ "}
+                  {sn.name} ({sn.ids.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => removeSnapshot(sn.id)}
+                  className="text-[10px] px-1.5 py-1 text-text-muted hover:text-node-concept border-l border-border-subtle"
+                  title="Delete snapshot"
+                >
+                  ✕
+                </button>
+              </span>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Feature 27: explain this error path */}
+      {errorPath && errorPathHopCount > 0 && (
+        <div>
+          {explainState === "idle" ? (
+            <button
+              type="button"
+              data-testid="explain-error-path"
+              onClick={onExplainErrorPath}
+              className="text-[10px] font-semibold text-[rgb(248,113,113)] hover:brightness-125 transition-all"
+              title="Send the failing hop chain to claude -p"
+            >
+              ✦ explain this error path
+            </button>
+          ) : (
+            explainPanel
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function TraceView({ accessToken }: TraceViewProps) {
   const graph = useDashboardStore((s) => s.graph);
   const traceRoot = useDashboardStore((s) => s.traceRoot);
@@ -1015,9 +1560,32 @@ export default function TraceView({ accessToken }: TraceViewProps) {
   const pathTarget = useDashboardStore((s) => s.tracePathTarget);
   const setPathTarget = useDashboardStore((s) => s.setPathTarget);
 
+  // Wave-3 debug state
+  const watches = useDashboardStore((s) => s.workspace.watches);
+  const removeWatch = useDashboardStore((s) => s.removeWatch);
+  const predicateStr = useDashboardStore((s) => s.tracePredicate);
+  const predicateFilter = useDashboardStore((s) => s.tracePredicateFilter);
+  const errorPathOn = useDashboardStore((s) => s.traceErrorPath);
+  const heatOn = useDashboardStore((s) => s.traceHeat);
+  const snapshotTrace = useDashboardStore((s) => s.snapshotTrace);
+  const diffBaseline = useDashboardStore((s) => s.traceDiffBaseline);
+  const snapshots = useDashboardStore((s) => s.traceSnapshots);
+
   const [copied, setCopied] = useState(false);
   const [tourSaved, setTourSaved] = useState(false);
+  const [snapped, setSnapped] = useState(false);
   const hopRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  // Feature 21/22: per-hop debug metadata reported up by HopCards.
+  const [hopMeta, setHopMeta] = useState<Record<string, { isError: boolean; watchHits: number }>>({});
+  const reportMeta = useRef((id: string, meta: { isError: boolean; watchHits: number }) => {
+    setHopMeta((prev) => {
+      const cur = prev[id];
+      if (cur && cur.isError === meta.isError && cur.watchHits === meta.watchHits) return prev;
+      return { ...prev, [id]: meta };
+    });
+  }).current;
+  // Feature 21/22: when set, ask HopCard #index to reveal a line (jump).
+  const [jumpRequest, setJumpRequest] = useState<{ index: number; line: number | null; nonce: number } | null>(null);
 
   const focusId = traceStack.length > 0 ? traceStack[traceStack.length - 1] : traceRoot;
 
@@ -1046,6 +1614,80 @@ export default function TraceView({ accessToken }: TraceViewProps) {
     if (!graph || !focusId || !criticalOn || pathTarget) return new Set<string>();
     return computeCriticalPath(graph, focusId, direction);
   }, [graph, focusId, criticalOn, direction, pathTarget]);
+
+  // ---- Wave-3 derived debug state --------------------------------------
+  const currentIds = useMemo(() => hops.map((h) => h.id), [hops]);
+
+  // Feature 26: parse predicate + per-hop match (uses reported error meta).
+  const predicate = useMemo(() => parsePredicate(predicateStr), [predicateStr]);
+  const predicateActive = predicate.kind !== "";
+  const predicateMatchById = useMemo(() => {
+    const m = new Map<string, boolean>();
+    if (!graph || !predicateActive) return m;
+    for (const h of hops) {
+      const isErr = hopMeta[h.id]?.isError ?? looksLikeErrorNode(h);
+      m.set(h.id, hopMatchesPredicate(predicate, h, graph, isErr));
+    }
+    return m;
+  }, [graph, predicate, predicateActive, hops, hopMeta]);
+
+  // Feature 27: error-path hop ids (reported error status, fallback heuristic).
+  const errorPathIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const h of hops) {
+      const isErr = hopMeta[h.id]?.isError ?? looksLikeErrorNode(h);
+      if (isErr) s.add(h.id);
+    }
+    return s;
+  }, [hops, hopMeta]);
+
+  // Feature 30: diff current trace vs the armed snapshot baseline.
+  const diff = useMemo(() => {
+    const snap = snapshots.find((s) => s.id === diffBaseline);
+    if (!snap) return null;
+    return diffTraceIds(currentIds, snap.ids);
+  }, [snapshots, diffBaseline, currentIds]);
+
+  // Feature 27: explain-the-error-path via claude -p (reuse the existing hook).
+  const { state: errExplain, explain: runErrExplain, askFollowUp: askErr, reset: resetErr } =
+    useExplain(accessToken);
+  const explainErrorPath = () => {
+    const errHops = hops.filter((h) => errorPathIds.has(h.id));
+    const target = errHops.find((h) => h.filePath && h.lineRange) ?? errHops[0];
+    if (target?.filePath && target.lineRange) {
+      runErrExplain(target.filePath, target.lineRange[0], target.lineRange[1], target.lineRange[0]);
+    }
+  };
+
+  // Feature 21: jump to the next hop that touches any watched symbol, cycling
+  // through occurrences on repeated clicks. (Aggregate watchHits signal — exact
+  // per-watch line targeting happens inside the hop via "↩ where set".)
+  const watchCursor = useRef(0);
+  const jumpToWatch = (_sym: string) => {
+    const hitIdxs = hops
+      .map((h, i) => ((hopMeta[h.id]?.watchHits ?? 0) > 0 ? i : -1))
+      .filter((i) => i >= 0);
+    if (hitIdxs.length === 0) return;
+    const target = hitIdxs[watchCursor.current % hitIdxs.length];
+    watchCursor.current += 1;
+    setJumpRequest({ index: target, line: null, nonce: Date.now() });
+    const el = hopRefs.current.get(target);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
+  // Per-watch hop counts for the Watches panel.
+  const watchHopCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const w of watches) counts[w] = 0;
+    for (const h of hops) {
+      if ((hopMeta[h.id]?.watchHits ?? 0) > 0) {
+        // Attribute to every watch (cheap; exact per-watch attribution would
+        // require per-watch source scanning here — kept aggregate).
+        for (const w of watches) counts[w] = (counts[w] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [watches, hops, hopMeta]);
 
   // Packages present in the trace + default-mute seeding.
   const packagesPresent = useMemo(() => packagesIn(hops), [hops]);
@@ -1119,7 +1761,12 @@ export default function TraceView({ accessToken }: TraceViewProps) {
     if (next) next.scrollIntoView({ behavior: "smooth", block: "center" });
   };
 
+  // Feature 26: when "filter to matches" is on, hide non-matching hops entirely.
+  const hiddenByPredicate = (node: GraphNode): boolean =>
+    predicateActive && predicateFilter && !(predicateMatchById.get(node.id) ?? false);
+
   const renderHop = (node: GraphNode, i: number) => {
+    if (hiddenByPredicate(node)) return null;
     const cls = classify(node);
     if (cls === "folded") {
       return (
@@ -1145,6 +1792,10 @@ export default function TraceView({ accessToken }: TraceViewProps) {
     }
     const isCritical = criticalIds.has(node.id);
     const dimmed = criticalOn && criticalIds.size > 0 && !isCritical;
+    const predicateMatch = predicateActive ? (predicateMatchById.get(node.id) ?? false) : null;
+    const diffStatus = diff ? (diff.statusById.get(node.id) ?? null) : null;
+    const scrollToLine =
+      jumpRequest && jumpRequest.index === i ? jumpRequest.line ?? -1 : null;
     return (
       <HopCard
         key={`${node.id}-${i}`}
@@ -1164,6 +1815,13 @@ export default function TraceView({ accessToken }: TraceViewProps) {
           if (el) hopRefs.current.set(i, el);
           else hopRefs.current.delete(i);
         }}
+        watches={watches}
+        onReportMeta={reportMeta}
+        heatOn={heatOn}
+        errorPathOn={errorPathOn}
+        predicateMatch={predicateMatch}
+        diffStatus={diffStatus}
+        scrollToLine={scrollToLine}
       />
     );
   };
@@ -1233,6 +1891,35 @@ export default function TraceView({ accessToken }: TraceViewProps) {
           />
         </div>
 
+        {/* Wave-3 debug toolbar */}
+        <div className="mb-2">
+          <DebugBar
+            errorPathHopCount={errorPathIds.size}
+            onExplainErrorPath={explainErrorPath}
+            explainState={errExplain.status}
+            explainPanel={
+              <ExplainPanel
+                state={errExplain}
+                title="✦ Error path"
+                onClose={resetErr}
+                onAsk={askErr}
+              />
+            }
+          />
+        </div>
+
+        {/* Feature 21: Watches panel */}
+        {watches.length > 0 && (
+          <div className="mb-2">
+            <WatchesPanel
+              watches={watches}
+              hitCounts={watchHopCounts}
+              onRemove={removeWatch}
+              onJumpNext={jumpToWatch}
+            />
+          </div>
+        )}
+
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="min-w-0">
             <div className="text-base font-heading text-text-primary truncate" title={focusNode.name}>
@@ -1282,6 +1969,19 @@ export default function TraceView({ accessToken }: TraceViewProps) {
             </button>
             <button
               type="button"
+              data-testid="snapshot-trace"
+              onClick={() => {
+                snapshotTrace(focusNode.name, currentIds);
+                setSnapped(true);
+                window.setTimeout(() => setSnapped(false), 1800);
+              }}
+              className="text-[10px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded border border-border-subtle text-text-muted hover:text-text-primary hover:border-border-medium transition-colors"
+              title="Snapshot this trace's structure (in-app capture; diff later)"
+            >
+              {snapped ? "Snapped 📌" : "📌 Snapshot"}
+            </button>
+            <button
+              type="button"
               onClick={toggleBookmarksPanel}
               className="text-[10px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded border border-border-subtle text-text-muted hover:text-text-primary hover:border-border-medium transition-colors"
               title="Open the Bookmarks / Investigation panel"
@@ -1317,6 +2017,31 @@ export default function TraceView({ accessToken }: TraceViewProps) {
 
           {/* Trace column */}
           <div className="flex-1 min-w-0">
+            {/* Feature 30: hops present in the snapshot but gone from this trace. */}
+            {diff && diff.removed.length > 0 && (
+              <div
+                data-testid="diff-removed"
+                className="mb-3 rounded-lg border border-[rgb(248,113,113)]/40 bg-[rgb(248,113,113)]/5 px-3 py-2"
+              >
+                <div className="text-[10px] uppercase tracking-wider text-[rgb(248,113,113)] mb-1.5">
+                  − removed vs snapshot ({diff.removed.length})
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {diff.removed.map((id) => {
+                    const n = nodesById.get(id);
+                    return (
+                      <span
+                        key={id}
+                        className="text-[11px] font-mono px-2 py-1 rounded border border-[rgb(248,113,113)]/30 text-[rgb(248,113,113)]/90 line-through"
+                        title={n ? lineLabel(n) : id}
+                      >
+                        {n?.name ?? id}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             {pathTarget && pathHops && pathHops.length === 0 ? (
               <div className="max-w-lg mx-auto mt-8 text-center">
                 <p className="text-text-secondary text-sm">
@@ -1342,6 +2067,7 @@ export default function TraceView({ accessToken }: TraceViewProps) {
             ) : layout === "flat" ? (
               <div className="space-y-2">
                 {hops.map((node, i) => {
+                  if (hiddenByPredicate(node)) return null;
                   const cls = classify(node);
                   const isCritical = criticalIds.has(node.id);
                   const dimmed = criticalOn && criticalIds.size > 0 && !isCritical;
