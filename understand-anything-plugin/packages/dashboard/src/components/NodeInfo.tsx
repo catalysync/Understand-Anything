@@ -848,6 +848,10 @@ export default function NodeInfo() {
   const focusNodeId = useDashboardStore((s) => s.focusNodeId);
   const viewMode = useDashboardStore((s) => s.viewMode);
   const domainGraph = useDashboardStore((s) => s.domainGraph);
+  // 200-series item 50: pin / freeze node position.
+  const pinnedPositions = useDashboardStore((s) => s.pinnedPositions);
+  const toggleNodePin = useDashboardStore((s) => s.toggleNodePin);
+  const reactFlowInstance = useDashboardStore((s) => s.reactFlowInstance);
 
   const activeGraph = viewMode === "domain" && domainGraph ? domainGraph : graph;
   const node = activeGraph?.nodes.find((n) => n.id === selectedNodeId) ?? null;
@@ -964,18 +968,43 @@ export default function NodeInfo() {
         </span>
       </div>
 
-      <div className="flex items-center justify-between mb-2">
-        <h2 className="text-lg font-heading text-text-primary">{node.name}</h2>
-        <button
-          onClick={() => setFocusNode(focusNodeId === node.id ? null : node.id)}
-          className={`text-[10px] font-semibold uppercase tracking-wider px-2.5 py-1 rounded transition-colors ${
-            focusNodeId === node.id
-              ? "bg-gold/20 text-gold border border-gold/40"
-              : "text-text-muted border border-border-subtle hover:text-gold hover:border-gold/30"
-          }`}
-        >
-          {focusNodeId === node.id ? t.common.unfocus : t.common.focus}
-        </button>
+      <div className="flex items-center justify-between mb-2 gap-2">
+        <h2 className="text-lg font-heading text-text-primary min-w-0 truncate">{node.name}</h2>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Item 50: pin / freeze this node's position across re-layouts */}
+          <button
+            onClick={() => {
+              const rfNode = reactFlowInstance?.getNode(node.id);
+              const pos = rfNode
+                ? { x: rfNode.position.x, y: rfNode.position.y }
+                : undefined;
+              toggleNodePin(node.id, pos);
+            }}
+            className={`text-[12px] leading-none px-2 py-1 rounded transition-colors ${
+              pinnedPositions[node.id]
+                ? "bg-gold/20 text-gold border border-gold/40"
+                : "text-text-muted border border-border-subtle hover:text-gold hover:border-gold/30"
+            }`}
+            title={
+              pinnedPositions[node.id]
+                ? "Unpin — let this node flow on the next re-layout"
+                : "Pin — freeze this node's position across filters / re-layouts"
+            }
+            aria-pressed={!!pinnedPositions[node.id]}
+          >
+            {pinnedPositions[node.id] ? "📌" : "📍"}
+          </button>
+          <button
+            onClick={() => setFocusNode(focusNodeId === node.id ? null : node.id)}
+            className={`text-[10px] font-semibold uppercase tracking-wider px-2.5 py-1 rounded transition-colors ${
+              focusNodeId === node.id
+                ? "bg-gold/20 text-gold border border-gold/40"
+                : "text-text-muted border border-border-subtle hover:text-gold hover:border-gold/30"
+            }`}
+          >
+            {focusNodeId === node.id ? t.common.unfocus : t.common.focus}
+          </button>
+        </div>
       </div>
 
       <p className="text-sm text-text-secondary mb-4 leading-relaxed">

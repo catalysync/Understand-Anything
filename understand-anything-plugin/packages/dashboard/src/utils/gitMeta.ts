@@ -107,6 +107,59 @@ export function formatCommitDate(epochSec: number | null): { rel: string; abs: s
 }
 
 // ---------------------------------------------------------------------------
+// 200-series item 87: stale / recently-changed node indicators.
+// `lastCommitAt` is epoch-seconds. A node is "recently changed" within
+// RECENT_WINDOW_DAYS. `stalenessTint` returns a 0..1 freshness ratio (1 = just
+// changed) for an age dot/tint. All graceful when git data is absent.
+// ---------------------------------------------------------------------------
+
+const RECENT_WINDOW_DAYS = 30;
+
+/** Days since a node's last commit, or null if no git timestamp. */
+export function daysSinceChange(node: GraphNode | null | undefined): number | null {
+  const meta = gitMetaFor(node);
+  if (!meta || meta.lastCommitAt === null) return null;
+  const ms = meta.lastCommitAt * 1000;
+  const diff = Date.now() - ms;
+  if (!Number.isFinite(diff)) return null;
+  return Math.max(0, diff / 86_400_000);
+}
+
+/** True if the node was changed within the recent window (default 30d). */
+export function isRecentlyChanged(
+  node: GraphNode | null | undefined,
+  windowDays = RECENT_WINDOW_DAYS,
+): boolean {
+  const d = daysSinceChange(node);
+  return d !== null && d <= windowDays;
+}
+
+/**
+ * Freshness ratio in [0,1] for a node — 1 just changed, decaying linearly to
+ * 0 at `windowDays`. null when the node has no git timestamp OR is older than
+ * the window (caller renders no dot in that case).
+ */
+export function freshnessRatio(
+  node: GraphNode | null | undefined,
+  windowDays = RECENT_WINDOW_DAYS,
+): number | null {
+  const d = daysSinceChange(node);
+  if (d === null || d > windowDays) return null;
+  return Math.max(0, Math.min(1, 1 - d / windowDays));
+}
+
+/** Set of node ids changed within the recent window (empty when no git data). */
+export function recentlyChangedIds(
+  graph: KnowledgeGraph | null,
+  windowDays = RECENT_WINDOW_DAYS,
+): Set<string> {
+  const out = new Set<string>();
+  if (!graph) return out;
+  for (const n of graph.nodes) if (isRecentlyChanged(n, windowDays)) out.add(n.id);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Item 51: ownership / bus-factor overlay. Stable owner → hue mapping, plus a
 // single-owner (busFactor === 1) flag for complex nodes.
 // ---------------------------------------------------------------------------

@@ -81,8 +81,11 @@ import {
   RESILIENCE_GLYPH,
   RESILIENCE_LABEL,
   nodeIdsForOwner,
+  recentlyChangedIds,
+  freshnessRatio,
 } from "../utils/gitMeta";
 import type { ResilienceKind } from "../utils/gitMeta";
+import { presetNodeIds } from "../utils/filterPresets";
 
 const nodeTypes = {
   custom: CustomNode,
@@ -517,6 +520,12 @@ function useLayerDetailTopology(): LayerDetailTopology & {
   const cyclesOnly = useDashboardStore((s) => s.cyclesOnly);
   // 300-series item 21: "public surface only" — collapse internal code nodes.
   const publicSurfaceOnly = useDashboardStore((s) => s.publicSurfaceOnly);
+  // 200-series items 72/74/87: connectivity / preset / staleness filters.
+  const minDegree = useDashboardStore((s) => s.minDegree);
+  const activePreset = useDashboardStore((s) => s.activePreset);
+  const recentlyChangedOnly = useDashboardStore((s) => s.recentlyChangedOnly);
+  // 200-series item 50: pinned node positions (applied post-layout).
+  const pinnedPositions = useDashboardStore((s) => s.pinnedPositions);
 
   const handleNodeSelect = useCallback(
     (nodeId: string) => {
@@ -624,6 +633,46 @@ function useLayerDetailTopology(): LayerDetailTopology & {
         if (n.id === focusNodeId) return true;
         return visibility.get(n.id) !== "internal";
       });
+    }
+
+    // 200-series item 74: filter preset — restrict to the preset's keep-set
+    // (computed over the whole graph). null/empty preset = no constraint, and
+    // the focused node is always kept so the view never blanks.
+    if (activePreset) {
+      const keep = presetNodeIds(activePreset, graph);
+      if (keep && keep.size > 0) {
+        filteredGraphNodes = filteredGraphNodes.filter(
+          (n) => keep.has(n.id) || n.id === focusNodeId,
+        );
+      }
+    }
+
+    // 200-series item 87: recently-changed-only — keep nodes touched within the
+    // recent git window. Graceful no-op when the graph has no git timestamps.
+    if (recentlyChangedOnly) {
+      const recent = recentlyChangedIds(graph);
+      if (recent.size > 0) {
+        filteredGraphNodes = filteredGraphNodes.filter(
+          (n) => recent.has(n.id) || n.id === focusNodeId,
+        );
+      }
+    }
+
+    // 200-series item 72: minimum-connections filter — hide nodes whose degree
+    // (within the currently-visible edge set) is below minDegree. Pairs with the
+    // "hubs only" quick button (which sets minDegree to a hub threshold).
+    if (minDegree > 0) {
+      const visibleSet = new Set(filteredGraphNodes.map((n) => n.id));
+      const degree = new Map<string, number>();
+      for (const e of graph.edges) {
+        if (!visibleSet.has(e.source) || !visibleSet.has(e.target)) continue;
+        if (e.source === e.target) continue;
+        degree.set(e.source, (degree.get(e.source) ?? 0) + 1);
+        degree.set(e.target, (degree.get(e.target) ?? 0) + 1);
+      }
+      filteredGraphNodes = filteredGraphNodes.filter(
+        (n) => n.id === focusNodeId || (degree.get(n.id) ?? 0) >= minDegree,
+      );
     }
 
     // Item 48: declutter — drop low-degree leaf nodes (degree ≤ 1 within the
@@ -854,6 +903,9 @@ function useLayerDetailTopology(): LayerDetailTopology & {
     declutterLeaves,
     cyclesOnly,
     publicSurfaceOnly,
+    minDegree,
+    activePreset,
+    recentlyChangedOnly,
     handleNodeSelect,
     handleContainerToggle,
   ]);
@@ -939,8 +991,17 @@ function useLayerDetailTopology(): LayerDetailTopology & {
     ];
 
     const commit = (positionedNodes: Node[]) => {
+      // 200-series item 50: honour pinned positions — a pinned atom keeps its
+      // frozen coordinate across re-layouts (filter/declutter/layout switch).
+      const pins = useDashboardStore.getState().pinnedPositions;
+      const pinnedNodes = Object.keys(pins).length === 0
+        ? positionedNodes
+        : positionedNodes.map((n) => {
+            const p = pins[n.id];
+            return p ? { ...n, position: { x: p.x, y: p.y } } : n;
+          });
       setTopology({
-        nodes: positionedNodes,
+        nodes: pinnedNodes,
         edges: aggEdges,
         portalNodes,
         portalEdges,
@@ -1000,7 +1061,7 @@ function useLayerDetailTopology(): LayerDetailTopology & {
     return () => {
       cancelled = true;
     };
-  }, [built, stage1Tick, structuralLayout, structuralDirection]);
+  }, [built, stage1Tick, structuralLayout, structuralDirection, pinnedPositions]);
 
   // ── Stage 2: lazy per-container layout on expand ───────────────────────
   // Watches expandedContainers and computes ELK on each newly-expanded
@@ -1249,6 +1310,10 @@ function useLayerDetailGraph() {
   const selectNode = useDashboardStore((s) => s.selectNode);
   // Item 83: complexity heat overlay flag, applied per-node below.
   const complexityHeat = useDashboardStore((s) => s.complexityHeat);
+  // 200-series item 87: stale / recently-changed indicator dot + age tint.
+  const staleIndicators = useDashboardStore((s) => s.staleIndicators);
+  // 200-series item 50: pinned positions — drives per-node `draggable`.
+  const pinnedPositions = useDashboardStore((s) => s.pinnedPositions);
   // 300-series items 12-14: reachability / dead-code overlay.
   const reachabilityRootId = useDashboardStore((s) => s.reachabilityRootId);
   const deadCodeOverlay = useDashboardStore((s) => s.deadCodeOverlay);
@@ -1453,6 +1518,19 @@ function useLayerDetailGraph() {
   // 300-series item 117: churn-risk ("suspect commit") node set.
   const churnRiskSet = useMemo(() => (graph ? churnRiskIds(graph) : null), [graph]);
 
+  // 200-series item 87: freshness ratio (1=just changed .. 0=window edge) per
+  // node, only when the stale-indicator overlay is on AND the graph has git
+  // timestamps. null map = no tinting (graceful empty state).
+  const freshnessById = useMemo(() => {
+    if (!graph || !staleIndicators) return null;
+    const m = new Map<string, number>();
+    for (const n of graph.nodes) {
+      const r = freshnessRatio(n);
+      if (r !== null) m.set(n.id, r);
+    }
+    return m.size > 0 ? m : null;
+  }, [graph, staleIndicators]);
+
   // 300-series item 27: import-cycle node + edge sets (only when overlay on).
   const cycles = useMemo(
     () => (graph && cyclesOverlay ? detectImportCycles(graph) : null),
@@ -1590,9 +1668,15 @@ function useLayerDetailGraph() {
       const isChurnRiskNode = churnRiskSet?.has(node.id) ?? false;
       const isInCycle = cycleNodeIds?.has(node.id) ?? false;
       const isPublicNode = publicSet?.has(node.id) ?? false;
+      // 200-series item 87: freshness (recently-changed) ratio for the dot/tint.
+      const staleRatio = freshnessById?.get(node.id) ?? null;
+      // 200-series item 50: pinned nodes are draggable (drag re-pins them).
+      const draggable = !!pinnedPositions[node.id];
 
       // Skip creating a new object if nothing visual changed
       if (
+        (node.draggable ?? false) === draggable &&
+        data.staleRatio === staleRatio &&
         data.isHighlighted === isHighlighted &&
         data.searchScore === searchScore &&
         data.isSelected === isSelected &&
@@ -1615,7 +1699,7 @@ function useLayerDetailGraph() {
         return node;
       }
 
-      return { ...node, data: { ...data, isHighlighted, searchScore, isSelected, isTourHighlighted, isNeighbor, isSelectionFaded, heat: complexityHeat, coverage, coverageTestCount, isTestImpacted, instrumentation, isSwallowed, errRole, ownerColor: ownerColorVal, isSingleOwner, isChurnRisk: isChurnRiskNode, isInCycle, isPublic: isPublicNode } };
+      return { ...node, draggable, data: { ...data, isHighlighted, searchScore, isSelected, isTourHighlighted, isNeighbor, isSelectionFaded, heat: complexityHeat, coverage, coverageTestCount, isTestImpacted, instrumentation, isSwallowed, errRole, ownerColor: ownerColorVal, isSingleOwner, isChurnRisk: isChurnRiskNode, isInCycle, isPublic: isPublicNode, staleRatio } };
     });
   }, [
     topo.nodes,
@@ -1640,6 +1724,8 @@ function useLayerDetailGraph() {
     churnRiskSet,
     cycleNodeIds,
     publicSet,
+    freshnessById,
+    pinnedPositions,
   ]);
 
   // Replace aggregated edges incident to an expanded container with the
@@ -2053,6 +2139,20 @@ function GraphViewInner() {
     [navigationLevel],
   );
 
+  // 200-series item 50: dragging a (draggable) node persists its new position
+  // as a pin so it survives re-layouts. Only pinned nodes are draggable (see
+  // `nodes` mapping below), so any drag-stop here is a re-pin.
+  const onNodeDragStop = useCallback(
+    (_: React.MouseEvent, node: { id: string; position: { x: number; y: number } }) => {
+      if (navigationLevel === "overview" || node.id.startsWith("portal:")) return;
+      useDashboardStore.getState().pinNodePosition(node.id, {
+        x: node.position.x,
+        y: node.position.y,
+      });
+    },
+    [navigationLevel],
+  );
+
   // K3: right-click a structural node → shared JumpActions menu. Skip the
   // overview lens (its "nodes" are layer clusters) and portal nodes.
   const onNodeContextMenu = useCallback(
@@ -2125,6 +2225,7 @@ function GraphViewInner() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={onNodeClick}
+        onNodeDragStop={onNodeDragStop}
         onEdgeClick={onEdgeClick}
         onNodeContextMenu={onNodeContextMenu}
         onPaneClick={onPaneClick}

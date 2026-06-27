@@ -171,6 +171,8 @@ export interface CustomNodeData extends Record<string, unknown> {
   isInCycle?: boolean;
   /** 300-series item 21: node is part of the public API surface (badged). */
   isPublic?: boolean;
+  /** 200-series item 87: freshness ratio (1=just changed..0=window edge); null=not recent. */
+  staleRatio?: number | null;
 }
 
 // 300-series item 39: tri-state coverage palette (green / amber / red).
@@ -331,6 +333,20 @@ function CustomNodeComponent({
             {data.nodeType}
           </span>
           <div className="flex items-center gap-1.5">
+            {data.staleRatio != null && (
+              <span
+                className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
+                style={{
+                  backgroundColor: "#5a9e6f",
+                  // Fresher → more opaque dot (subtle age tint).
+                  opacity: 0.35 + 0.6 * data.staleRatio,
+                  boxShadow: "0 0 4px rgba(90,158,111,0.5)",
+                }}
+                role="img"
+                aria-label="Recently changed"
+                title="Recently changed (git)"
+              />
+            )}
             {data.isPublic && (
               <span
                 className="text-[8px] font-bold uppercase px-1 rounded bg-[#7da7d4]/15 text-[#7da7d4] leading-none"

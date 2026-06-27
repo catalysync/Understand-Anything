@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef } from "react";
 import { useDashboardStore, ALL_NODE_TYPES, ALL_COMPLEXITIES, ALL_EDGE_CATEGORIES } from "../store";
 import type { NodeType, Complexity, EdgeCategory } from "../store";
 import { useI18n } from "../contexts/I18nContext";
+import { FILTER_PRESETS, presetAvailable } from "../utils/filterPresets";
+import { hasGitMeta } from "../utils/gitMeta";
 
 const COMPLEXITY_LABELS = ["simple", "moderate", "complex"] as const;
 
@@ -22,7 +24,23 @@ export default function FilterPanel() {
   const setComplexityRange = useDashboardStore((s) => s.setComplexityRange);
   const onlyComplex = useDashboardStore((s) => s.onlyComplex);
   const toggleOnlyComplex = useDashboardStore((s) => s.toggleOnlyComplex);
+  // 200-series 72/74/87: connectivity / preset / staleness filters.
+  const minDegree = useDashboardStore((s) => s.minDegree);
+  const setMinDegree = useDashboardStore((s) => s.setMinDegree);
+  const toggleHubsOnly = useDashboardStore((s) => s.toggleHubsOnly);
+  const activePreset = useDashboardStore((s) => s.activePreset);
+  const setActivePreset = useDashboardStore((s) => s.setActivePreset);
+  const recentlyChangedOnly = useDashboardStore((s) => s.recentlyChangedOnly);
+  const toggleRecentlyChangedOnly = useDashboardStore((s) => s.toggleRecentlyChangedOnly);
+  const staleIndicators = useDashboardStore((s) => s.staleIndicators);
+  const toggleStaleIndicators = useDashboardStore((s) => s.toggleStaleIndicators);
   const { t } = useI18n();
+
+  const gitMetaPresent = useMemo(() => hasGitMeta(graph), [graph]);
+  const availablePresets = useMemo(
+    () => FILTER_PRESETS.filter((p) => presetAvailable(p.id, graph)),
+    [graph],
+  );
 
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -101,7 +119,10 @@ export default function FilterPanel() {
     hasActiveFilters() ||
     tagFilter.size > 0 ||
     complexityRange[0] > 0 ||
-    complexityRange[1] < 2;
+    complexityRange[1] < 2 ||
+    minDegree > 0 ||
+    activePreset !== null ||
+    recentlyChangedOnly;
 
   return (
     <div ref={containerRef} className="relative">
@@ -133,6 +154,34 @@ export default function FilterPanel() {
       {filterPanelOpen && (
         <div className="absolute right-0 top-full mt-2 w-72 glass rounded-lg shadow-xl overflow-hidden animate-fade-slide-in z-50">
           <div className="p-4 space-y-4">
+            {/* Presets (item 74) — one-click quick filters */}
+            {availablePresets.length > 0 && (
+              <div>
+                <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
+                  Presets
+                </h3>
+                <div className="flex flex-wrap gap-1.5">
+                  {availablePresets.map((p) => {
+                    const active = activePreset === p.id;
+                    return (
+                      <button
+                        key={p.id}
+                        onClick={() => setActivePreset(p.id)}
+                        title={p.hint}
+                        className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
+                          active
+                            ? "border-gold bg-gold/15 text-gold"
+                            : "border-border-subtle bg-elevated text-text-secondary hover:text-text-primary"
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Node Types */}
             <div>
               <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
@@ -227,6 +276,69 @@ export default function FilterPanel() {
                 </span>
               </div>
             </div>
+
+            {/* Connectivity / degree filter (item 72) */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider">
+                  Min connections
+                </h3>
+                <button
+                  onClick={toggleHubsOnly}
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded border transition-colors ${
+                    minDegree >= 5
+                      ? "border-gold/50 bg-gold/10 text-gold"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                  title="Show only highly-connected hub nodes"
+                >
+                  Hubs only
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={0}
+                  max={12}
+                  step={1}
+                  value={minDegree}
+                  onChange={(e) => setMinDegree(Number(e.target.value))}
+                  className="flex-1 accent-gold"
+                />
+                <span className="text-[10px] text-text-secondary w-10 text-right shrink-0 tabular-nums">
+                  {minDegree === 0 ? "off" : `≥ ${minDegree}`}
+                </span>
+              </div>
+            </div>
+
+            {/* Staleness / recently-changed (item 87) */}
+            {gitMetaPresent && (
+              <div>
+                <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
+                  Freshness
+                </h3>
+                <div className="space-y-1.5">
+                  <label className="flex items-center gap-2 cursor-pointer hover:bg-elevated/50 rounded px-2 py-1 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={recentlyChangedOnly}
+                      onChange={toggleRecentlyChangedOnly}
+                      className="w-3.5 h-3.5 rounded border-border-subtle bg-elevated checked:bg-gold checked:border-gold focus:ring-0 cursor-pointer"
+                    />
+                    <span className="text-sm text-text-primary">Recently changed only</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer hover:bg-elevated/50 rounded px-2 py-1 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={staleIndicators}
+                      onChange={toggleStaleIndicators}
+                      className="w-3.5 h-3.5 rounded border-border-subtle bg-elevated checked:bg-gold checked:border-gold focus:ring-0 cursor-pointer"
+                    />
+                    <span className="text-sm text-text-primary">Show change-age dots</span>
+                  </label>
+                </div>
+              </div>
+            )}
 
             {/* Tag facet — multi-select top tags (item 70) */}
             {topTags.length > 0 && (
@@ -325,6 +437,9 @@ export default function FilterPanel() {
                   resetFilters();
                   clearTagFilter();
                   setComplexityRange([0, 2]);
+                  setMinDegree(0);
+                  setActivePreset(null);
+                  if (recentlyChangedOnly) toggleRecentlyChangedOnly();
                 }}
                 className="w-full px-3 py-1.5 text-sm bg-elevated hover:bg-gold/20 text-text-secondary hover:text-gold rounded-lg transition-colors"
               >

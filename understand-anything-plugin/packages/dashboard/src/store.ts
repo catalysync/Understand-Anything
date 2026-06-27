@@ -39,11 +39,30 @@ import {
   loadLayerOverrides,
   saveLayerOverrides,
 } from "./utils/layerOverrides";
+import {
+  type SearchHistory,
+  EMPTY_SEARCH_HISTORY,
+  loadSearchHistory,
+  saveSearchHistory,
+  pushRecentSearch,
+  toggleStarredSearch as toggleStarredHist,
+} from "./utils/searchHistory";
+import {
+  type PinnedPositions,
+  loadPinnedPositions,
+  savePinnedPositions,
+} from "./utils/pinnedPositions";
+import { parseScopes, compilePattern, regexSearch, nodeMatchesScope } from "./utils/searchScope";
+import type { FilterPresetId } from "./utils/filterPresets";
 
 export type { OnboardingGoal };
 export type { LayerOverrideMap };
 export type { AppSettings, RecentEntity, PinnedEntity };
 export type { BoundaryRule };
+export type { FilterPresetId };
+
+/** Search mode: fuzzy (Fuse), semantic (alias), or regex/glob (200-65). */
+export type SearchMode = "fuzzy" | "semantic" | "regex";
 
 // ── Architecture boundary rules (300-series item 26) ───────────────────────
 // Persisted per-project to localStorage (outside the workspace whitelist).
@@ -388,8 +407,33 @@ interface DashboardStore {
   searchQuery: string;
   searchResults: SearchResult[];
   searchEngine: SearchEngine | null;
-  searchMode: "fuzzy" | "semantic";
-  setSearchMode: (mode: "fuzzy" | "semantic") => void;
+  searchMode: SearchMode;
+  setSearchMode: (mode: SearchMode) => void;
+
+  // ── Search result cycling (200-series item 67) ─────────────────────────────
+  /** Index into searchResults of the currently-cycled match (-1 = none). */
+  searchCycleIndex: number;
+  /** Step to the next (dir=1) / prev (dir=-1) match, focusing + panning to it. */
+  cycleSearchResult: (dir: 1 | -1) => void;
+
+  // ── Recent + starred searches (200-series item 69) ─────────────────────────
+  searchHistory: SearchHistory;
+  /** Commit the current query to the recents MRU (called on submit/blur). */
+  commitRecentSearch: (query: string) => void;
+  /** Star / unstar a query. */
+  toggleStarredSearch: (query: string) => void;
+
+  // ── Pinned / frozen node positions (200-series item 50) ────────────────────
+  /** nodeId → fixed layout coord; honoured by the ELK/force layout passes. */
+  pinnedPositions: PinnedPositions;
+  /** Pin a node at a layout coordinate (drag-drop or lock toggle). */
+  pinNodePosition: (nodeId: string, pos: { x: number; y: number }) => void;
+  /** Remove a node's pin so it flows freely on the next re-layout. */
+  unpinNodePosition: (nodeId: string) => void;
+  /** Toggle a node's pin; when pinning without a coord, the caller passes one. */
+  toggleNodePin: (nodeId: string, pos?: { x: number; y: number }) => void;
+  isNodePinned: (nodeId: string) => boolean;
+  clearPinnedPositions: () => void;
 
   // Lens navigation
   navigationLevel: NavigationLevel;
@@ -456,6 +500,22 @@ interface DashboardStore {
   /** 83: recolor nodes green→amber→red by complexity. */
   complexityHeat: boolean;
   toggleComplexityHeat: () => void;
+
+  // ── Connectivity / preset / staleness filters (200-series items 72/74/87) ──
+  /** 72: minimum degree (incident edges) a node must have to stay visible. 0 = off. */
+  minDegree: number;
+  setMinDegree: (n: number) => void;
+  /** 72: "hubs only" quick toggle — jumps minDegree to a hub threshold. */
+  toggleHubsOnly: () => void;
+  /** 74: active one-click filter preset (null = none). */
+  activePreset: FilterPresetId | null;
+  setActivePreset: (id: FilterPresetId | null) => void;
+  /** 87: restrict the graph to recently-changed nodes (git lastCommitAt). */
+  recentlyChangedOnly: boolean;
+  toggleRecentlyChangedOnly: () => void;
+  /** 87: subtle age-tint / dot on recently-changed nodes (persisted). */
+  staleIndicators: boolean;
+  toggleStaleIndicators: () => void;
 
   // ── Reachability / dead-code overlay (300-series items 12-14) ─────────────
   /** When set, BFS-highlight nodes reachable from this root; dim the rest. */
@@ -965,7 +1025,10 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   searchQuery: "",
   searchResults: [],
   searchEngine: null,
-  searchMode: "fuzzy",
+  searchMode: readPersisted<SearchMode>("ua-search-mode-v1", ["fuzzy", "semantic", "regex"], "fuzzy"),
+  searchCycleIndex: -1,
+  searchHistory: { ...EMPTY_SEARCH_HISTORY },
+  pinnedPositions: {},
 
   navigationLevel: "overview",
   activeLayerId: null,
@@ -1124,6 +1187,61 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     ),
   complexityHeat: false,
   toggleComplexityHeat: () => set((s) => ({ complexityHeat: !s.complexityHeat })),
+
+  // ── Connectivity / preset / staleness filters (200-series 72/74/87) ────────
+  minDegree: 0,
+  setMinDegree: (n) =>
+    set((s) => {
+      const next = Math.max(0, Math.min(20, Math.round(n)));
+      if (next === s.minDegree) return {};
+      return {
+        minDegree: next,
+        containerLayoutCache: new Map(),
+        containerSizeMemory: new Map(),
+        expandedContainers: new Set(),
+        pendingFocusContainer: null,
+      };
+    }),
+  toggleHubsOnly: () =>
+    set((s) => {
+      // Hubs-only is "minDegree at the hub threshold (5)"; toggles back to 0.
+      const next = s.minDegree >= 5 ? 0 : 5;
+      return {
+        minDegree: next,
+        containerLayoutCache: new Map(),
+        containerSizeMemory: new Map(),
+        expandedContainers: new Set(),
+        pendingFocusContainer: null,
+      };
+    }),
+  activePreset: null,
+  setActivePreset: (id) =>
+    set((s) => {
+      const next = s.activePreset === id ? null : id;
+      return {
+        activePreset: next,
+        containerLayoutCache: new Map(),
+        containerSizeMemory: new Map(),
+        expandedContainers: new Set(),
+        pendingFocusContainer: null,
+      };
+    }),
+  recentlyChangedOnly: false,
+  toggleRecentlyChangedOnly: () =>
+    set((s) => ({
+      recentlyChangedOnly: !s.recentlyChangedOnly,
+      containerLayoutCache: new Map(),
+      containerSizeMemory: new Map(),
+      expandedContainers: new Set(),
+      pendingFocusContainer: null,
+    })),
+  staleIndicators: readPersisted("ua-stale-indicators-v1", ["on", "off"], "off") === "on",
+  toggleStaleIndicators: () =>
+    set((s) => {
+      const next = !s.staleIndicators;
+      persist("ua-stale-indicators-v1", next ? "on" : "off");
+      return { staleIndicators: next };
+    }),
 
   // ── Reachability / dead-code overlay (300-series items 12-14) ─────────────
   reachabilityRootId: null,
@@ -1482,19 +1600,109 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       expandedContainers: new Set(),
       pendingFocusContainer: null,
     }),
-  setSearchMode: (mode) => set({ searchMode: mode }),
+  setSearchMode: (mode) => {
+    persist("ua-search-mode-v1", mode);
+    set({ searchMode: mode });
+    // Re-run the live query under the new mode so results update immediately.
+    const q = get().searchQuery;
+    if (q.trim()) get().setSearchQuery(q);
+  },
   setSearchQuery: (query) => {
     const engine = get().searchEngine;
     const mode = get().searchMode;
     if (!engine || !query.trim()) {
-      set({ searchQuery: query, searchResults: [] });
+      set({ searchQuery: query, searchResults: [], searchCycleIndex: -1 });
       return;
     }
-    // Currently both modes use the same fuzzy engine
-    // When embeddings are available, "semantic" mode will use SemanticSearchEngine
-    void mode;
-    const searchResults = engine.search(query);
-    set({ searchQuery: query, searchResults });
+
+    // Item 66: peel off scoped prefixes (type:/layer:/tag:/pkg:) before ranking.
+    const scope = parseScopes(query);
+    const free = scope.rest;
+    const { graph, nodeIdToLayerIds } = get();
+    const layerNameById = new Map<string, string>();
+    if (graph) for (const l of graph.layers) layerNameById.set(l.id, l.name);
+    const inScope = (nodeId: string): boolean => {
+      if (!scope.hasScope) return true;
+      const node = get().nodesById.get(nodeId);
+      if (!node) return false;
+      return nodeMatchesScope(node, scope, nodeIdToLayerIds, layerNameById);
+    };
+
+    const allNodes = graph?.nodes ?? [];
+    let raw: { nodeId: string; score: number }[];
+    if (mode === "regex") {
+      // Item 65: regex / glob over name + filePath. Empty free-text but a
+      // scope present → list everything matching the scope (score 0).
+      if (!free) {
+        raw = scope.hasScope ? allNodes.map((n) => ({ nodeId: n.id, score: 0 })) : [];
+      } else {
+        const pattern = compilePattern(free);
+        raw = pattern ? regexSearch(pattern, allNodes, 100) : [];
+      }
+    } else {
+      // fuzzy / semantic (semantic currently aliases fuzzy until embeddings).
+      void mode;
+      if (!free) {
+        raw = scope.hasScope ? allNodes.map((n) => ({ nodeId: n.id, score: 0 })) : [];
+      } else {
+        raw = engine.search(free);
+      }
+    }
+
+    const searchResults = raw.filter((r) => inScope(r.nodeId));
+    set({ searchQuery: query, searchResults, searchCycleIndex: -1 });
+  },
+
+  // ── Search result cycling (item 67) ────────────────────────────────────────
+  cycleSearchResult: (dir) => {
+    const { searchResults, searchCycleIndex } = get();
+    if (searchResults.length === 0) return;
+    const n = searchResults.length;
+    const next = ((searchCycleIndex + dir) % n + n) % n;
+    const target = searchResults[next];
+    set({ searchCycleIndex: next });
+    // Focus + pan to the match using the existing selection→center plumbing.
+    get().focusEntity(target.nodeId, { view: "structural" });
+  },
+
+  // ── Recent + starred searches (item 69) ────────────────────────────────────
+  commitRecentSearch: (query) => {
+    const q = query.trim();
+    if (!q) return;
+    const next = pushRecentSearch(get().searchHistory, q);
+    saveSearchHistory(settingsProjectKey, next);
+    set({ searchHistory: next });
+  },
+  toggleStarredSearch: (query) => {
+    const next = toggleStarredHist(get().searchHistory, query);
+    saveSearchHistory(settingsProjectKey, next);
+    set({ searchHistory: next });
+  },
+
+  // ── Pinned / frozen node positions (item 50) ───────────────────────────────
+  pinNodePosition: (nodeId, pos) => {
+    const next = { ...get().pinnedPositions, [nodeId]: { x: pos.x, y: pos.y } };
+    savePinnedPositions(settingsProjectKey, next);
+    set({ pinnedPositions: next });
+  },
+  unpinNodePosition: (nodeId) => {
+    const next = { ...get().pinnedPositions };
+    if (!(nodeId in next)) return;
+    delete next[nodeId];
+    savePinnedPositions(settingsProjectKey, next);
+    set({ pinnedPositions: next });
+  },
+  toggleNodePin: (nodeId, pos) => {
+    if (get().pinnedPositions[nodeId]) {
+      get().unpinNodePosition(nodeId);
+    } else if (pos) {
+      get().pinNodePosition(nodeId, pos);
+    }
+  },
+  isNodePinned: (nodeId) => !!get().pinnedPositions[nodeId],
+  clearPinnedPositions: () => {
+    savePinnedPositions(settingsProjectKey, {});
+    set({ pinnedPositions: {} });
   },
 
   setPersona: (persona) =>
@@ -1912,6 +2120,9 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       destinations,
       archRules,
       layerOverrides: loadLayerOverrides(settingsProjectKey),
+      // 200-series 69/50: hydrate recent/starred searches + pinned positions.
+      searchHistory: loadSearchHistory(settingsProjectKey),
+      pinnedPositions: loadPinnedPositions(settingsProjectKey),
       // Apply persisted trace defaults at load.
       traceDepth: Math.max(1, Math.min(6, settings.defaultTraceDepth)),
       traceDirection: settings.defaultTraceDirection,

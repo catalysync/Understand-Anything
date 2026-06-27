@@ -31,6 +31,13 @@ export default function SearchBar() {
   const openSearchResult = useDashboardStore((s) => s.openSearchResult);
   const searchMode = useDashboardStore((s) => s.searchMode);
   const setSearchMode = useDashboardStore((s) => s.setSearchMode);
+  // 200-series item 67: result cycling counter.
+  const searchCycleIndex = useDashboardStore((s) => s.searchCycleIndex);
+  const cycleSearchResult = useDashboardStore((s) => s.cycleSearchResult);
+  // 200-series item 69: recent + starred searches.
+  const searchHistory = useDashboardStore((s) => s.searchHistory);
+  const commitRecentSearch = useDashboardStore((s) => s.commitRecentSearch);
+  const toggleStarredSearch = useDashboardStore((s) => s.toggleStarredSearch);
   const { t } = useI18n();
 
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -44,6 +51,8 @@ export default function SearchBar() {
       nodeId: r.nodeId,
       score: r.score,
     }));
+    // In regex mode the store-side regexSearch already produced the matching
+    // node set; keep its ordering by feeding the hits to the federator.
     return federatedSearch(
       searchQuery,
       graph,
@@ -54,6 +63,7 @@ export default function SearchBar() {
   }, [searchQuery, graph, domainGraph, searchResults]);
 
   const topResults = federated.slice(0, 6);
+  const isStarred = !!searchQuery.trim() && searchHistory.starred.includes(searchQuery.trim());
 
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -66,22 +76,35 @@ export default function SearchBar() {
   const handleResultClick = useCallback(
     (nodeId: string, route: "trace" | "domain" | "structural" | "code", domainId?: string) => {
       openSearchResult(nodeId, route, domainId);
+      commitRecentSearch(searchQuery);
       setDropdownOpen(false);
     },
-    [openSearchResult],
+    [openSearchResult, commitRecentSearch, searchQuery],
   );
 
-  // Close dropdown on Escape
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
+  const applyHistoryQuery = useCallback(
+    (q: string) => {
+      setSearchQuery(q);
+      setDropdownOpen(true);
+      inputRef.current?.focus();
+    },
+    [setSearchQuery],
+  );
+
+  // Close dropdown on Escape; commit recent on Enter.
+  const handleKey = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
       if (e.key === "Escape") {
         setDropdownOpen(false);
         inputRef.current?.blur();
+      } else if (e.key === "Enter") {
+        commitRecentSearch(searchQuery);
+        // Item 67: Enter cycles to the next match (Shift+Enter = previous).
+        if (searchResults.length > 0) cycleSearchResult(e.shiftKey ? -1 : 1);
       }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, []);
+    },
+    [commitRecentSearch, searchQuery, searchResults.length, cycleSearchResult],
+  );
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -94,7 +117,13 @@ export default function SearchBar() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const showDropdown = dropdownOpen && !!searchQuery.trim() && topResults.length > 0;
+  const hasQuery = !!searchQuery.trim();
+  const showResults = dropdownOpen && hasQuery && topResults.length > 0;
+  // Item 69: when the box is empty + focused, show recent/starred instead.
+  const showHistory =
+    dropdownOpen &&
+    !hasQuery &&
+    (searchHistory.recent.length > 0 || searchHistory.starred.length > 0);
 
   const routeHint: Record<string, string> = {
     trace: "trace",
@@ -102,6 +131,24 @@ export default function SearchBar() {
     structural: "graph",
     code: "code",
   };
+
+  const modeButton = (mode: "fuzzy" | "semantic" | "regex", label: string) => (
+    <button
+      onClick={() => setSearchMode(mode)}
+      className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+        searchMode === mode
+          ? "bg-accent/20 text-accent"
+          : "text-text-muted hover:text-text-secondary"
+      }`}
+      title={
+        mode === "regex"
+          ? "Regex / glob over name & filePath (e.g. **/handlers/*.go)"
+          : undefined
+      }
+    >
+      {label}
+    </button>
+  );
 
   return (
     <div ref={containerRef} className="relative z-30">
@@ -125,34 +172,59 @@ export default function SearchBar() {
           value={searchQuery}
           onChange={handleInputChange}
           onFocus={() => setDropdownOpen(true)}
-          placeholder={t.search.placeholder}
+          onKeyDown={handleKey}
+          placeholder={
+            searchMode === "regex"
+              ? "Regex / glob (try **/handlers/*.go, type:function …)"
+              : t.search.placeholder
+          }
           data-testid="search-input"
           className="flex-1 min-w-0 bg-elevated text-text-primary text-sm rounded-lg px-3 py-1.5 border border-border-subtle focus:outline-none focus:border-accent/50 placeholder-text-muted"
         />
+        {/* Item 69: star the current query */}
+        {hasQuery && (
+          <button
+            onClick={() => toggleStarredSearch(searchQuery)}
+            className={`text-sm shrink-0 transition-colors ${
+              isStarred ? "text-gold" : "text-text-muted hover:text-text-secondary"
+            }`}
+            title={isStarred ? "Unstar this search" : "Star this search"}
+            aria-pressed={isStarred}
+          >
+            {isStarred ? "★" : "☆"}
+          </button>
+        )}
+        {/* Item 67: prev/next cycle controls + counter */}
+        {hasQuery && searchResults.length > 0 && (
+          <div className="hidden sm:flex items-center gap-1 shrink-0">
+            <button
+              onClick={() => cycleSearchResult(-1)}
+              className="text-text-muted hover:text-text-primary text-xs px-1 rounded"
+              title="Previous match (Shift+Enter, N)"
+              aria-label="Previous match"
+            >
+              ‹
+            </button>
+            <span className="text-[11px] font-mono text-text-secondary tabular-nums">
+              {searchCycleIndex >= 0 ? searchCycleIndex + 1 : 0} / {searchResults.length}
+            </span>
+            <button
+              onClick={() => cycleSearchResult(1)}
+              className="text-text-muted hover:text-text-primary text-xs px-1 rounded"
+              title="Next match (Enter, n)"
+              aria-label="Next match"
+            >
+              ›
+            </button>
+          </div>
+        )}
         <div className="flex items-center gap-1 bg-elevated rounded-lg p-0.5 shrink-0">
-          <button
-            onClick={() => setSearchMode("fuzzy")}
-            className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
-              searchMode === "fuzzy"
-                ? "bg-accent/20 text-accent"
-                : "text-text-muted hover:text-text-secondary"
-            }`}
-          >
-            {t.search.fuzzy}
-          </button>
-          <button
-            onClick={() => setSearchMode("semantic")}
-            className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
-              searchMode === "semantic"
-                ? "bg-accent/20 text-accent"
-                : "text-text-muted hover:text-text-secondary"
-            }`}
-          >
-            {t.search.semantic}
-          </button>
+          {modeButton("fuzzy", t.search.fuzzy)}
+          {modeButton("semantic", t.search.semantic)}
+          {modeButton("regex", "Regex")}
         </div>
-        {searchQuery.trim() && (
-          <span className="hidden sm:inline text-xs text-text-muted shrink-0">
+        {hasQuery && (
+          <span className="hidden md:inline text-xs text-text-muted shrink-0">
             {federated.length} {t.search.result}{federated.length !== 1 ? "s" : ""}{" "}
             <span className="text-text-muted">({searchMode})</span>
           </span>
@@ -160,7 +232,7 @@ export default function SearchBar() {
       </div>
 
       {/* Dropdown results — federated across structural / domain / symbols */}
-      {showDropdown && (
+      {showResults && (
         <div className="absolute left-4 right-4 top-full mt-0.5 glass rounded-lg shadow-xl overflow-hidden">
           {topResults.map((result) => {
             const route = routeForResult(result);
@@ -193,6 +265,60 @@ export default function SearchBar() {
               </button>
             );
           })}
+        </div>
+      )}
+
+      {/* Item 69: recent + starred searches when the box is empty */}
+      {showHistory && (
+        <div className="absolute left-4 right-4 top-full mt-0.5 glass rounded-lg shadow-xl overflow-hidden max-h-80 overflow-y-auto">
+          {searchHistory.starred.length > 0 && (
+            <div className="px-3 pt-2 pb-1">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1">
+                Starred
+              </div>
+              {searchHistory.starred.map((q) => (
+                <div
+                  key={`star-${q}`}
+                  className="group flex items-center gap-2 px-1 py-1 rounded hover:bg-elevated"
+                >
+                  <button
+                    type="button"
+                    onClick={() => applyHistoryQuery(q)}
+                    className="flex-1 flex items-center gap-2 text-left min-w-0"
+                  >
+                    <span className="text-gold text-sm shrink-0">★</span>
+                    <span className="text-sm text-text-primary truncate">{q}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toggleStarredSearch(q)}
+                    className="text-text-muted hover:text-text-secondary text-xs opacity-0 group-hover:opacity-100"
+                    title="Unstar"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {searchHistory.recent.length > 0 && (
+            <div className="px-3 pt-2 pb-2">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted mb-1">
+                Recent
+              </div>
+              {searchHistory.recent.map((q) => (
+                <button
+                  key={`recent-${q}`}
+                  type="button"
+                  onClick={() => applyHistoryQuery(q)}
+                  className="w-full flex items-center gap-2 px-1 py-1 rounded hover:bg-elevated text-left"
+                >
+                  <span className="text-text-muted text-xs shrink-0">↻</span>
+                  <span className="text-sm text-text-secondary truncate">{q}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

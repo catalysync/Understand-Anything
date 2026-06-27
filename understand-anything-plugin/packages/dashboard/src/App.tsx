@@ -622,6 +622,48 @@ function DashboardContent({
         action: () => useDashboardStore.getState().setSettingsModalOpen(true),
         category: "General",
       },
+      // 200-series item 52: recenter the viewport on the selected node.
+      {
+        key: "c",
+        description: "Recenter on the selected node",
+        action: () => {
+          const state = useDashboardStore.getState();
+          const id = state.selectedNodeId;
+          if (!id) return;
+          const rf = state.reactFlowInstance;
+          if (!rf) return;
+          const node = rf.getNode(id);
+          if (!node) return;
+          const zoom = rf.getViewport().zoom;
+          const w = (node.width ?? node.measured?.width ?? 0) as number;
+          const h = (node.height ?? node.measured?.height ?? 0) as number;
+          rf.setCenter(node.position.x + w / 2, node.position.y + h / 2, {
+            zoom,
+            duration: 400,
+          });
+        },
+        category: "Navigation",
+      },
+      // 200-series item 67: cycle to next / previous search match.
+      {
+        key: "n",
+        description: "Next search match",
+        action: () => {
+          const state = useDashboardStore.getState();
+          if (state.searchResults.length > 0) state.cycleSearchResult(1);
+        },
+        category: "Navigation",
+      },
+      {
+        key: "n",
+        shiftKey: true,
+        description: "Previous search match",
+        action: () => {
+          const state = useDashboardStore.getState();
+          if (state.searchResults.length > 0) state.cycleSearchResult(-1);
+        },
+        category: "Navigation",
+      },
     ],
     [t]
   );
