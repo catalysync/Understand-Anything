@@ -423,6 +423,18 @@ interface DashboardStore {
   complexityHeat: boolean;
   toggleComplexityHeat: () => void;
 
+  // ── Reachability / dead-code overlay (300-series items 12-14) ─────────────
+  /** When set, BFS-highlight nodes reachable from this root; dim the rest. */
+  reachabilityRootId: string | null;
+  /** Dead-code mode: dim nodes reachable from NO entrypoint (union of all). */
+  deadCodeOverlay: boolean;
+  /** Set/clear the reachability root (also clears dead-code mode). */
+  setReachabilityRoot: (id: string | null) => void;
+  /** Toggle the dead-code overlay (also clears any single-root reachability). */
+  toggleDeadCodeOverlay: () => void;
+  /** Clear all reachability overlays. */
+  clearReachabilityOverlay: () => void;
+
   setGraph: (graph: KnowledgeGraph) => void;
   selectNode: (nodeId: string | null) => void;
   navigateToNode: (nodeId: string) => void;
@@ -980,6 +992,14 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     ),
   complexityHeat: false,
   toggleComplexityHeat: () => set((s) => ({ complexityHeat: !s.complexityHeat })),
+
+  // ── Reachability / dead-code overlay (300-series items 12-14) ─────────────
+  reachabilityRootId: null,
+  deadCodeOverlay: false,
+  setReachabilityRoot: (id) => set({ reachabilityRootId: id, deadCodeOverlay: false }),
+  toggleDeadCodeOverlay: () =>
+    set((s) => ({ deadCodeOverlay: !s.deadCodeOverlay, reachabilityRootId: null })),
+  clearReachabilityOverlay: () => set({ reachabilityRootId: null, deadCodeOverlay: false }),
 
   setGraph: (graph) => {
     const searchEngine = new SearchEngine(graph.nodes);

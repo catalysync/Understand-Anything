@@ -19,10 +19,11 @@ import ProjectOverview from "./ProjectOverview";
 import FileExplorer from "./FileExplorer";
 
 const LearnPanel = lazy(() => import("./LearnPanel"));
+const FrontDoorPanel = lazy(() => import("./FrontDoorPanel"));
 
-type Tab = "overview" | "files" | "saved";
+type Tab = "overview" | "files" | "doors" | "saved";
 const TAB_KEY = "ua-sidebar-tab-v1";
-const ALL_TABS: Tab[] = ["overview", "files", "saved"];
+const ALL_TABS: Tab[] = ["overview", "files", "doors", "saved"];
 
 function readTab(): Tab {
   if (typeof window === "undefined") return "overview";
@@ -335,6 +336,7 @@ export default function SidebarInspector() {
   const tabLabels: Record<Tab, string> = {
     overview: t.sidebar.info,
     files: t.sidebar.files,
+    doors: "Doors",
     saved: "Saved",
   };
 
@@ -362,6 +364,10 @@ export default function SidebarInspector() {
       <div className="flex-1 min-h-0 overflow-auto">
         {tab === "files" ? (
           <FileExplorer />
+        ) : tab === "doors" ? (
+          <Suspense fallback={null}>
+            <FrontDoorPanel />
+          </Suspense>
         ) : tab === "saved" ? (
           <SavedTab />
         ) : (

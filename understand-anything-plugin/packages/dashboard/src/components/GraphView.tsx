@@ -59,6 +59,7 @@ import {
 import { deriveContainers } from "../utils/containers";
 import type { DerivedContainer } from "../utils/containers";
 import { computeLayerStats } from "../utils/layerStats";
+import { reachableFrom, deadCodeSet } from "../utils/opsLayer";
 
 const nodeTypes = {
   custom: CustomNode,
@@ -1144,6 +1145,10 @@ function useLayerDetailGraph() {
   const selectNode = useDashboardStore((s) => s.selectNode);
   // Item 83: complexity heat overlay flag, applied per-node below.
   const complexityHeat = useDashboardStore((s) => s.complexityHeat);
+  // 300-series items 12-14: reachability / dead-code overlay.
+  const reachabilityRootId = useDashboardStore((s) => s.reachabilityRootId);
+  const deadCodeOverlay = useDashboardStore((s) => s.deadCodeOverlay);
+  const graph = useDashboardStore((s) => s.graph);
 
   const handleNodeSelect = useCallback(
     (nodeId: string) => selectNode(nodeId),
@@ -1262,6 +1267,24 @@ function useLayerDetailGraph() {
     return s;
   }, [selectedNodeId, topo.filteredEdges, topo.nodeToContainer]);
 
+  // 300-series items 12-14: reachability / dead-code dim set. When a single
+  // root is chosen we dim everything NOT reachable from it; in dead-code mode
+  // we dim nodes reachable from NO entrypoint. `dimSet` holds ids to fade.
+  // Empty when no overlay is active (or the graph lacks the edges to compute).
+  const reachDimSet = useMemo(() => {
+    if (!graph) return null;
+    if (reachabilityRootId) {
+      const live = reachableFrom(graph, [reachabilityRootId]);
+      const dim = new Set<string>();
+      for (const n of graph.nodes) if (!live.has(n.id)) dim.add(n.id);
+      return dim;
+    }
+    if (deadCodeOverlay) {
+      return deadCodeSet(graph);
+    }
+    return null;
+  }, [graph, reachabilityRootId, deadCodeOverlay]);
+
   // Combine Stage 1 nodes with Stage 2 expanded children, then apply the
   // visual overlay (selection, search, tour) to every CustomFlowNode in
   // the combined set. Container nodes get their own overlay branch.
@@ -1327,7 +1350,11 @@ function useLayerDetailGraph() {
       const isTourHighlighted = tourSet.has(node.id);
       const hasSelection = !!selectedNodeId;
       const isNeighbor = hasSelection && neighborNodeIds.has(node.id) && !isSelected;
-      const isSelectionFaded = hasSelection && !neighborNodeIds.has(node.id);
+      // Reachability/dead-code dim composes with selection fade: a node is faded
+      // if selection-unrelated OR (overlay active and the node is in the dim set).
+      const isReachDimmed = reachDimSet !== null && reachDimSet.has(node.id);
+      const isSelectionFaded =
+        (hasSelection && !neighborNodeIds.has(node.id)) || (isReachDimmed && !isSelected);
 
       const data = node.data as CustomFlowNode["data"];
 

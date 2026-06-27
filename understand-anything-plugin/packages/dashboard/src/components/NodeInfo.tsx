@@ -2,6 +2,11 @@ import { useState } from "react";
 import { useDashboardStore } from "../store";
 import { useI18n } from "../contexts/I18nContext";
 import type { NodeType, KnowledgeGraph, GraphNode } from "@understand-anything/core/types";
+import {
+  opsLayerForNode,
+  nodeTypeIcon,
+  routeIdentity,
+} from "../utils/opsLayer";
 
 // Badge color classes keyed by NodeType — must be kept in sync with core NodeType union.
 const typeBadgeColors: Record<NodeType, string> = {
@@ -329,6 +334,101 @@ function DomainStepDetails({ node }: { node: GraphNode }) {
   );
 }
 
+/**
+ * The KEYSTONE cross-layer panel. When a code node is selected this lists the
+ * operations-layer nodes it backs (routes it handles, tables it queries, errors
+ * it raises, tests covering it, config it reads …) grouped by relation. When an
+ * ops-layer node is selected it shows the code nodes that define/use it. Each
+ * row jumps via focusEntity; a "Trace" affordance starts a trace at the target.
+ */
+function OpsLayerSection({ node, graph }: { node: GraphNode; graph: KnowledgeGraph }) {
+  const focusEntity = useDashboardStore((s) => s.focusEntity);
+  const startTraceAt = useDashboardStore((s) => s.startTraceAt);
+  const groups = opsLayerForNode(graph, node.id);
+  if (groups.length === 0) return null;
+
+  return (
+    <div className="mb-4 space-y-3">
+      <h3 className="text-[11px] font-semibold text-accent uppercase tracking-wider">
+        Operations layer
+      </h3>
+      {groups.map((g) => (
+        <div key={`${g.label}-${g.edgeType}`}>
+          <h4 className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5">
+            {g.label} ({g.rows.length})
+          </h4>
+          <div className="space-y-1.5">
+            {g.rows.map((row) => {
+              const { method, path } = routeIdentity(row.node);
+              const rowBadge = typeBadgeColors[row.node.type as NodeType] ?? typeBadgeColors.file;
+              return (
+                <div
+                  key={`${g.edgeType}-${row.node.id}`}
+                  className="text-xs bg-elevated rounded-lg px-3 py-2 border border-border-subtle flex items-center gap-2 group"
+                >
+                  <span className="shrink-0" aria-hidden>{nodeTypeIcon(row.node.type)}</span>
+                  <span className={`text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0 ${rowBadge}`}>
+                    {row.node.type}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => focusEntity(row.node.id)}
+                    className="flex-1 min-w-0 text-left text-text-primary truncate hover:text-accent transition-colors"
+                    title={`Jump to ${row.node.name}`}
+                  >
+                    {method && (
+                      <span className="font-mono text-[10px] text-node-endpoint mr-1.5">{method}</span>
+                    )}
+                    <span>{path ?? row.node.name}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => startTraceAt(row.node.id)}
+                    className="shrink-0 opacity-0 group-hover:opacity-100 text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-accent/30 text-accent hover:text-accent-bright transition-all"
+                    title="Trace from here"
+                  >
+                    ▶
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Route/endpoint method · path metadata strip for entrypoint nodes. */
+function OpsMetaBadges({ node }: { node: GraphNode }) {
+  const { method, path } = routeIdentity(node);
+  if (!method && !path && !node.kind && !node.severity) return null;
+  return (
+    <div className="mb-4 flex flex-wrap items-center gap-1.5 text-[11px]">
+      {method && (
+        <span className="font-mono font-semibold px-2 py-0.5 rounded bg-node-endpoint/10 text-node-endpoint border border-node-endpoint/30">
+          {method}
+        </span>
+      )}
+      {path && (
+        <span className="font-mono px-2 py-0.5 rounded bg-elevated text-text-secondary border border-border-subtle truncate max-w-full" title={path}>
+          {path}
+        </span>
+      )}
+      {node.kind && (
+        <span className="px-2 py-0.5 rounded bg-elevated text-text-muted border border-border-subtle">
+          {node.kind}
+        </span>
+      )}
+      {node.severity && (
+        <span className="px-2 py-0.5 rounded bg-[#c97070]/10 text-[#c97070] border border-[#c97070]/30 uppercase tracking-wider">
+          {node.severity}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function NodeInfo() {
   const graph = useDashboardStore((s) => s.graph);
   const selectedNodeId = useDashboardStore((s) => s.selectedNodeId);
@@ -481,6 +581,9 @@ export default function NodeInfo() {
         {node.summary}
       </p>
 
+      {/* Operations-layer metadata (method · path · kind · severity) */}
+      <OpsMetaBadges node={node} />
+
       {/* Flow / Trace entry point */}
       <button
         type="button"
@@ -572,6 +675,11 @@ export default function NodeInfo() {
       {activeGraph && node && (node.type === "domain" || node.type === "flow" || node.type === "step") && (
         <DomainNodeDetails node={node} graph={activeGraph} />
       )}
+
+      {/* Keystone: cross-layer operations connections (used_by / handles_route /
+          queries_table / raises / tested_by / reads_config …). Renders nothing
+          when the graph has no operations-layer enrichment yet. */}
+      {activeGraph && node && <OpsLayerSection node={node} graph={activeGraph} />}
 
       {/* Child classes/functions within this file */}
       {childNodes.length > 0 && (
