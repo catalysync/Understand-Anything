@@ -169,6 +169,8 @@ export interface CustomNodeData extends Record<string, unknown> {
   isChurnRisk?: boolean;
   /** 300-series item 27: node participates in an import cycle. */
   isInCycle?: boolean;
+  /** 300-series item 21: node is part of the public API surface (badged). */
+  isPublic?: boolean;
 }
 
 // 300-series item 39: tri-state coverage palette (green / amber / red).
@@ -329,6 +331,16 @@ function CustomNodeComponent({
             {data.nodeType}
           </span>
           <div className="flex items-center gap-1.5">
+            {data.isPublic && (
+              <span
+                className="text-[8px] font-bold uppercase px-1 rounded bg-[#7da7d4]/15 text-[#7da7d4] leading-none"
+                role="img"
+                aria-label="Public API surface"
+                title="Public — exported or referenced across a layer/file boundary"
+              >
+                pub
+              </span>
+            )}
             {data.isChurnRisk && (
               <span
                 className="text-[8px] font-bold uppercase px-1 rounded bg-[#d35d6e]/15 text-[#d35d6e] leading-none"

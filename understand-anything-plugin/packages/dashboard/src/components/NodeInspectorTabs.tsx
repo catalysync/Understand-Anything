@@ -31,6 +31,8 @@ import {
   computedMetricsFor,
   nodeTypeIcon,
   CODE_TYPES,
+  ENTRYPOINT_TYPES,
+  handlerForEntrypoint,
 } from "../utils/opsLayer";
 import type { GraphNode, KnowledgeGraph } from "@understand-anything/core/types";
 import {
@@ -293,17 +295,54 @@ function TestsTab({ node, graph }: { node: GraphNode; graph: KnowledgeGraph }) {
 // ── Ops tab ────────────────────────────────────────────────────────────────
 function OpsTab({ node, graph }: { node: GraphNode; graph: KnowledgeGraph }) {
   const focusEntity = useDashboardStore((s) => s.focusEntity);
+  const nodeIdToDomainStep = useDashboardStore((s) => s.nodeIdToDomainStep);
+  const navigateToDomain = useDashboardStore((s) => s.navigateToDomain);
+  const setViewMode = useDashboardStore((s) => s.setViewMode);
   const groups = useMemo(() => opsLayerForNode(graph, node.id), [graph, node.id]);
   const obs = useMemo(() => observabilityFor(graph, node.id), [graph, node.id]);
   const errors = useMemo(() => (CODE_TYPES.has(node.type) ? uncaughtErrorsFor(graph, node.id) : []), [graph, node.id]);
 
+  // 300-series item 28: route → domain-flow bridge. For an entrypoint, resolve
+  // its handler file → the domain step that covers it (via nodeIdToDomainStep).
+  const domainStep = useMemo(() => {
+    if (!ENTRYPOINT_TYPES.has(node.type)) return null;
+    const handler = handlerForEntrypoint(graph, node.id);
+    if (!handler) return null;
+    return nodeIdToDomainStep.get(handler.id) ?? null;
+  }, [graph, node.id, node.type, nodeIdToDomainStep]);
+
   const obsTotal = obs.logs.length + obs.spans.length + obs.metrics.length + obs.alerts.length;
-  if (groups.length === 0 && obsTotal === 0 && errors.length === 0) {
+  if (groups.length === 0 && obsTotal === 0 && errors.length === 0 && !domainStep) {
     return <EmptyHint>No operations-layer connections (routes, data, errors, telemetry, ownership) for this node.</EmptyHint>;
   }
 
   return (
     <div className="px-4 py-3 space-y-4">
+      {domainStep && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-node-concept mb-1.5">
+            Part of domain flow
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              navigateToDomain(domainStep.domainId);
+              setViewMode("domain", { keepSelection: false });
+            }}
+            className="w-full flex items-center gap-2 text-xs bg-node-concept/5 rounded-lg px-2.5 py-2 border border-node-concept/30 hover:border-node-concept/60 text-left transition-colors"
+            title={`Open domain flow: ${domainStep.flowName}`}
+          >
+            <span className="text-node-concept shrink-0" aria-hidden>◆</span>
+            <span className="flex-1 min-w-0">
+              <span className="block text-text-primary truncate">{domainStep.flowName}</span>
+              <span className="block text-[10px] text-text-muted truncate">
+                {domainStep.domainName} · step: {domainStep.stepName}
+              </span>
+            </span>
+            <span className="text-node-concept shrink-0">→</span>
+          </button>
+        </div>
+      )}
       {groups.map((g) => (
         <div key={`${g.label}-${g.edgeType}`}>
           <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5">
@@ -627,6 +666,7 @@ export default function NodeInspectorTabs() {
   const domainGraph = useDashboardStore((s) => s.domainGraph);
   const viewMode = useDashboardStore((s) => s.viewMode);
   const selectedNodeId = useDashboardStore((s) => s.selectedNodeId);
+  const nodeIdToDomainStep = useDashboardStore((s) => s.nodeIdToDomainStep);
   const [tab, setTab] = useState<DeepTab>(readDeepTab);
 
   const activeGraph = viewMode === "domain" && domainGraph ? domainGraph : graph;
@@ -648,10 +688,19 @@ export default function NodeInspectorTabs() {
         (isTest && codeUnderTest(activeGraph, node.id).length > 0)) set.add("tests");
     const obs = observabilityFor(activeGraph, node.id);
     const obsTotal = obs.logs.length + obs.spans.length + obs.metrics.length + obs.alerts.length;
+    // 300-series item 28: an entrypoint with a resolvable domain step also
+    // surfaces the Ops tab (which hosts the "part of <flow>" bridge link).
+    const hasDomainBridge =
+      ENTRYPOINT_TYPES.has(node.type) &&
+      (() => {
+        const h = handlerForEntrypoint(activeGraph, node.id);
+        return h ? nodeIdToDomainStep.get(h.id) != null : false;
+      })();
     if (opsLayerForNode(activeGraph, node.id).length > 0 || obsTotal > 0 ||
+        hasDomainBridge ||
         (isCode && uncaughtErrorsFor(activeGraph, node.id).length > 0)) set.add("ops");
     return set;
-  }, [activeGraph, node]);
+  }, [activeGraph, node, nodeIdToDomainStep]);
 
   const visibleTabs = ALL_DEEP_TABS.filter((t) => tabsWithData.has(t));
 

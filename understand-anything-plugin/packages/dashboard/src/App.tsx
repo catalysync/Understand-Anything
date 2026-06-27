@@ -325,6 +325,14 @@ function DashboardContent({
   const toggleResilienceBadges = useDashboardStore((s) => s.toggleResilienceBadges);
   const hotspotPanelOpen = useDashboardStore((s) => s.hotspotPanelOpen);
   const toggleHotspotPanel = useDashboardStore((s) => s.toggleHotspotPanel);
+  // 300-series items 9-10/21/22/25/26: architecture & API-surface tier.
+  const archPanelOpen = useDashboardStore((s) => s.archPanelOpen);
+  const toggleArchPanel = useDashboardStore((s) => s.toggleArchPanel);
+  const boundaryOverlay = useDashboardStore((s) => s.boundaryOverlay);
+  const publicSurfaceOnly = useDashboardStore((s) => s.publicSurfaceOnly);
+  const togglePublicSurfaceOnly = useDashboardStore((s) => s.togglePublicSurfaceOnly);
+  const c4Level = useDashboardStore((s) => s.c4Level);
+  const setC4Level = useDashboardStore((s) => s.setC4Level);
   const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(readSidebarWidth);
   const resizingRef = useRef(false);
@@ -914,6 +922,59 @@ function DashboardContent({
                   }`}
                 >
                   ▦ Hotspots
+                </button>
+                {/* 300-series item 25: C4 zoom level (System → Layer → File) */}
+                <div className="flex items-center rounded border border-border-medium overflow-hidden">
+                  {([
+                    { id: "system" as const, label: "System" },
+                    { id: "layer" as const, label: "Layer" },
+                    { id: "file" as const, label: "File" },
+                  ]).map((lvl) => (
+                    <button
+                      key={lvl.id}
+                      type="button"
+                      onClick={() => {
+                        setC4Level(lvl.id);
+                        if (lvl.id === "system") {
+                          useDashboardStore.getState().navigateToOverview();
+                        }
+                      }}
+                      title={`C4 boundary level — ${lvl.label}`}
+                      className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 transition-colors ${
+                        c4Level === lvl.id
+                          ? "bg-accent/15 text-accent"
+                          : "bg-elevated text-text-muted hover:text-text-secondary"
+                      }`}
+                    >
+                      {lvl.label}
+                    </button>
+                  ))}
+                </div>
+                {/* 300-series item 21: public-surface-only filter */}
+                <button
+                  type="button"
+                  onClick={togglePublicSurfaceOnly}
+                  title="Public surface only — collapse internal code nodes; badge public ones"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    publicSurfaceOnly
+                      ? "border-[#7da7d4]/50 bg-[#7da7d4]/10 text-[#7da7d4]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  ◑ Public
+                </button>
+                {/* 300-series items 9-10/22/26: architecture & API-surface panel */}
+                <button
+                  type="button"
+                  onClick={toggleArchPanel}
+                  title="Architecture panel — boundary rules / event bus / public API surface"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    archPanelOpen || boundaryOverlay
+                      ? "border-[#d35d6e]/50 bg-[#d35d6e]/10 text-[#d35d6e]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  ⊞ Architecture
                 </button>
               </>
             )}

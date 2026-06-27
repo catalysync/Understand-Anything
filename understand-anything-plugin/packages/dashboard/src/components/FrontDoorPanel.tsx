@@ -79,10 +79,112 @@ function EntrypointRow({ entry }: { entry: EntrypointEntry }) {
   );
 }
 
+/**
+ * 300-series item 28: routes grouped by their domain (resolved via the
+ * handler file → domain step). Routes with no resolvable domain fall into an
+ * "Unmapped" bucket. Only rendered when "by domain" is toggled on.
+ */
+function DomainGroupedView({ filter }: { filter: string }) {
+  const graph = useDashboardStore((s) => s.graph);
+  const nodeIdToDomainStep = useDashboardStore((s) => s.nodeIdToDomainStep);
+  const navigateToDomain = useDashboardStore((s) => s.navigateToDomain);
+  const setViewMode = useDashboardStore((s) => s.setViewMode);
+
+  const buckets = useMemo(() => {
+    if (!graph) return [];
+    const flat = entrypointIndex(graph).flatMap((g) => g.entries);
+    const byDomain = new Map<
+      string,
+      { domainId: string | null; domainName: string; flowNames: Set<string>; entries: EntrypointEntry[] }
+    >();
+    for (const e of flat) {
+      const handler = e.handler;
+      const ref = handler ? nodeIdToDomainStep.get(handler.id) : undefined;
+      const key = ref ? ref.domainId : "__unmapped__";
+      let b = byDomain.get(key);
+      if (!b) {
+        b = {
+          domainId: ref ? ref.domainId : null,
+          domainName: ref ? ref.domainName : "Unmapped",
+          flowNames: new Set<string>(),
+          entries: [],
+        };
+        byDomain.set(key, b);
+      }
+      if (ref) b.flowNames.add(ref.flowName);
+      b.entries.push(e);
+    }
+    // Mapped domains first (alpha), unmapped last.
+    return [...byDomain.values()].sort((a, b) => {
+      if (a.domainId && !b.domainId) return -1;
+      if (!a.domainId && b.domainId) return 1;
+      return a.domainName.localeCompare(b.domainName);
+    });
+  }, [graph, nodeIdToDomainStep]);
+
+  const q = filter.trim().toLowerCase();
+  const filtered = buckets
+    .map((b) => ({
+      ...b,
+      entries: q
+        ? b.entries.filter(
+            (e) =>
+              e.node.name.toLowerCase().includes(q) ||
+              (e.path ?? "").toLowerCase().includes(q) ||
+              (e.handler?.name ?? "").toLowerCase().includes(q),
+          )
+        : b.entries,
+    }))
+    .filter((b) => b.entries.length > 0);
+
+  if (filtered.length === 0) {
+    return <div className="text-[11px] text-text-muted px-1">No entrypoints match.</div>;
+  }
+
+  return (
+    <>
+      {filtered.map((b) => (
+        <div key={b.domainId ?? "__unmapped__"}>
+          <h3 className="text-[11px] font-semibold text-node-concept uppercase tracking-wider mb-2 flex items-center gap-1.5">
+            <span aria-hidden>◆</span>
+            {b.domainId ? (
+              <button
+                type="button"
+                onClick={() => {
+                  navigateToDomain(b.domainId!);
+                  setViewMode("domain", { keepSelection: false });
+                }}
+                className="hover:text-accent transition-colors"
+                title={`Open domain: ${b.domainName}`}
+              >
+                {b.domainName}
+              </button>
+            ) : (
+              <span className="text-text-muted">{b.domainName}</span>
+            )}
+            <span className="text-text-muted font-mono normal-case">({b.entries.length})</span>
+            {b.flowNames.size > 0 && (
+              <span className="text-[9px] text-text-muted normal-case font-normal truncate">
+                {[...b.flowNames].join(", ")}
+              </span>
+            )}
+          </h3>
+          <div className="space-y-1">
+            {b.entries.map((e) => (
+              <EntrypointRow key={e.node.id} entry={e} />
+            ))}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
 /** Entrypoint index grouped by kind, with a free-text filter. */
 function IndexView() {
   const graph = useDashboardStore((s) => s.graph);
   const [filter, setFilter] = useState("");
+  const [byDomain, setByDomain] = useState(false);
 
   const groups = useMemo(() => entrypointIndex(graph), [graph]);
   const filtered = useMemo(() => {
@@ -110,14 +212,30 @@ function IndexView() {
 
   return (
     <div className="px-4 py-3 space-y-4">
-      <input
-        type="text"
-        value={filter}
-        onChange={(e) => setFilter(e.target.value)}
-        placeholder="Filter entrypoints…"
-        className="w-full bg-surface text-text-primary text-xs rounded-md px-2.5 py-2 border border-border-subtle focus:outline-none focus:border-accent/50 placeholder-text-muted"
-      />
-      {filtered.length === 0 ? (
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter entrypoints…"
+          className="flex-1 min-w-0 bg-surface text-text-primary text-xs rounded-md px-2.5 py-2 border border-border-subtle focus:outline-none focus:border-accent/50 placeholder-text-muted"
+        />
+        <button
+          type="button"
+          onClick={() => setByDomain((v) => !v)}
+          title="Group routes by their domain (item 28)"
+          className={`shrink-0 text-[9px] font-semibold uppercase tracking-wider px-2 py-1.5 rounded border transition-colors ${
+            byDomain
+              ? "border-node-concept/50 bg-node-concept/10 text-node-concept"
+              : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+          }`}
+        >
+          ◆ Domain
+        </button>
+      </div>
+      {byDomain ? (
+        <DomainGroupedView filter={filter} />
+      ) : filtered.length === 0 ? (
         <div className="text-[11px] text-text-muted px-1">No entrypoints match.</div>
       ) : (
         filtered.map((g) => (

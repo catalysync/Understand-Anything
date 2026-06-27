@@ -24,6 +24,13 @@ import ContainerNode from "./ContainerNode";
 import type { ContainerFlowNode, ContainerNodeData } from "./ContainerNode";
 import Breadcrumb from "./Breadcrumb";
 import HotspotQuadrant from "./HotspotQuadrant";
+import ArchitecturePanel from "./ArchitecturePanel";
+import {
+  computeBoundaryViolations,
+  violationEdgeKeySet,
+  violationLayerPairKeys,
+  computeVisibility,
+} from "../utils/archLayer";
 import { useDashboardStore } from "../store";
 import type {
   GraphEdge,
@@ -291,6 +298,9 @@ function useOverviewGraph() {
   const nodeIdToLayerId = useDashboardStore((s) => s.nodeIdToLayerId);
   const searchResults = useDashboardStore((s) => s.searchResults);
   const drillIntoLayer = useDashboardStore((s) => s.drillIntoLayer);
+  // 300-series item 26: recolor layer→layer edges that carry a boundary violation.
+  const boundaryOverlay = useDashboardStore((s) => s.boundaryOverlay);
+  const archRules = useDashboardStore((s) => s.archRules);
 
   // Build cluster nodes / flow edges / dims synchronously; only the layout
   // call itself is async, so we memo the structural pieces and run ELK in an
@@ -343,17 +353,35 @@ function useOverviewGraph() {
 
     // Aggregate edges between layers
     const aggregated = aggregateLayerEdges(graph);
-    const flowEdges: Edge[] = aggregated.map((agg, i) => ({
-      id: `le-${i}`,
-      source: agg.sourceLayerId,
-      target: agg.targetLayerId,
-      label: `${agg.count}`,
-      style: {
-        stroke: "rgba(212,165,116,0.4)",
-        strokeWidth: Math.min(1 + Math.log2(agg.count + 1), 5),
-      },
-      labelStyle: { fill: "#a39787", fontSize: 11, fontWeight: 600 },
-    }));
+    // 300-series item 26: layer-pairs carrying ≥1 boundary violation → red.
+    const violationPairs =
+      boundaryOverlay
+        ? violationLayerPairKeys(computeBoundaryViolations(graph, archRules))
+        : null;
+    const flowEdges: Edge[] = aggregated.map((agg, i) => {
+      const [a, b] =
+        agg.sourceLayerId < agg.targetLayerId
+          ? [agg.sourceLayerId, agg.targetLayerId]
+          : [agg.targetLayerId, agg.sourceLayerId];
+      const isViolation = violationPairs?.has(`${a}|${b}`) ?? false;
+      return {
+        id: `le-${i}`,
+        source: agg.sourceLayerId,
+        target: agg.targetLayerId,
+        label: `${agg.count}`,
+        style: isViolation
+          ? {
+              stroke: "#d35d6e",
+              strokeWidth: Math.max(2, Math.min(1 + Math.log2(agg.count + 1), 5)),
+              strokeDasharray: "6 3",
+            }
+          : {
+              stroke: "rgba(212,165,116,0.4)",
+              strokeWidth: Math.min(1 + Math.log2(agg.count + 1), 5),
+            },
+        labelStyle: { fill: isViolation ? "#d35d6e" : "#a39787", fontSize: 11, fontWeight: 600 },
+      };
+    });
 
     const dims = new Map<string, { width: number; height: number }>();
     for (const n of clusterNodes) {
@@ -361,7 +389,7 @@ function useOverviewGraph() {
     }
 
     return { clusterNodes, flowEdges, dims };
-  }, [graph, nodesById, nodeIdToLayerId, searchResults, drillIntoLayer]);
+  }, [graph, nodesById, nodeIdToLayerId, searchResults, drillIntoLayer, boundaryOverlay, archRules]);
 
   const [overview, setOverview] = useState<{ nodes: Node[]; edges: Edge[] }>({
     nodes: [],
@@ -466,6 +494,8 @@ function useLayerDetailTopology(): LayerDetailTopology & {
   const tagFilter = useDashboardStore((s) => s.tagFilter);
   // 300-series item 27: cycles-only filtered view (restrict to cycle members).
   const cyclesOnly = useDashboardStore((s) => s.cyclesOnly);
+  // 300-series item 21: "public surface only" — collapse internal code nodes.
+  const publicSurfaceOnly = useDashboardStore((s) => s.publicSurfaceOnly);
 
   const handleNodeSelect = useCallback(
     (nodeId: string) => {
@@ -563,6 +593,16 @@ function useLayerDetailTopology(): LayerDetailTopology & {
     if (cyclesOnly) {
       const cycleIds = detectImportCycles(graph).nodeIds;
       filteredGraphNodes = filteredGraphNodes.filter((n) => cycleIds.has(n.id));
+    }
+
+    // 300-series item 21: public-surface-only — drop internal code nodes
+    // (visibility computed over the whole graph; non-code nodes stay visible).
+    if (publicSurfaceOnly) {
+      const visibility = computeVisibility(graph);
+      filteredGraphNodes = filteredGraphNodes.filter((n) => {
+        if (n.id === focusNodeId) return true;
+        return visibility.get(n.id) !== "internal";
+      });
     }
 
     // Item 48: declutter — drop low-degree leaf nodes (degree ≤ 1 within the
@@ -792,6 +832,7 @@ function useLayerDetailTopology(): LayerDetailTopology & {
     tagFilter,
     declutterLeaves,
     cyclesOnly,
+    publicSurfaceOnly,
     handleNodeSelect,
     handleContainerToggle,
   ]);
@@ -1126,6 +1167,8 @@ function buildDirectionalEdge(
     resilience?: ResilienceKind[];
     /** 300-series item 27: edge is inside an import cycle → red. */
     inCycle?: boolean;
+    /** 300-series item 26: edge violates an architecture boundary rule → red. */
+    inViolation?: boolean;
   },
 ): Edge {
   const weight = typeof edge.weight === "number" ? edge.weight : 0.5;
@@ -1134,7 +1177,9 @@ function buildDirectionalEdge(
   const strokeWidth = 1.2 + Math.max(0, Math.min(1, weight)) * 2.8;
   const dir = edge.direction ?? "forward";
   const inCycle = opts?.inCycle ?? false;
-  const markerColor = inCycle ? "#d35d6e" : "#a39787";
+  const inViolation = opts?.inViolation ?? false;
+  const isRed = inCycle || inViolation;
+  const markerColor = isRed ? "#d35d6e" : "#a39787";
   const marker = { type: MarkerType.ArrowClosed, color: markerColor, width: 16, height: 16 };
   const res = opts?.resilience ?? [];
   return {
@@ -1144,12 +1189,12 @@ function buildDirectionalEdge(
     type: "directional",
     markerEnd: dir === "forward" || dir === "bidirectional" ? marker : undefined,
     markerStart: dir === "backward" || dir === "bidirectional" ? marker : undefined,
-    style: inCycle
-      ? { stroke: "#d35d6e", strokeWidth: Math.max(2, strokeWidth) }
+    style: isRed
+      ? { stroke: "#d35d6e", strokeWidth: Math.max(2, strokeWidth), strokeDasharray: inViolation && !inCycle ? "6 3" : undefined }
       : { stroke: "rgba(212,165,116,0.55)", strokeWidth },
     data: {
       description: edge.description,
-      edgeLabel: edge.type,
+      edgeLabel: inViolation && !inCycle ? `⊁ ${edge.type}` : edge.type,
       resilienceGlyphs: res.length > 0 ? res.map((k) => RESILIENCE_GLYPH[k]).join("") : undefined,
       resilienceLabel: res.length > 0 ? res.map((k) => RESILIENCE_LABEL[k]).join(" · ") : undefined,
     },
@@ -1395,6 +1440,25 @@ function useLayerDetailGraph() {
   const cycleNodeIds = cycles?.nodeIds ?? null;
   const cycleEdgeKeys = cycles?.edgeKeys ?? null;
 
+  // 300-series item 26: architecture-boundary violation edge set (overlay on).
+  const boundaryOverlay = useDashboardStore((s) => s.boundaryOverlay);
+  const archRules = useDashboardStore((s) => s.archRules);
+  const violationEdgeKeys = useMemo(() => {
+    if (!graph || !boundaryOverlay) return null;
+    const violations = computeBoundaryViolations(graph, archRules);
+    return violations.length > 0 ? violationEdgeKeySet(violations) : null;
+  }, [graph, boundaryOverlay, archRules]);
+
+  // 300-series item 21: public-API node set (badge when surfacing visibility).
+  const publicSurfaceOnly = useDashboardStore((s) => s.publicSurfaceOnly);
+  const publicSet = useMemo(() => {
+    if (!graph || !publicSurfaceOnly) return null;
+    const vis = computeVisibility(graph);
+    const s = new Set<string>();
+    for (const [id, v] of vis) if (v === "public") s.add(id);
+    return s;
+  }, [graph, publicSurfaceOnly]);
+
   // 300-series item 108: resilience-badge edge map (only when badges on).
   const resilienceBadges = useDashboardStore((s) => s.resilienceBadges);
   const resilienceMap = useMemo(
@@ -1504,6 +1568,7 @@ function useLayerDetailGraph() {
       const isSingleOwner = ownership ? ownership.flaggedIds.has(node.id) : false;
       const isChurnRiskNode = churnRiskSet?.has(node.id) ?? false;
       const isInCycle = cycleNodeIds?.has(node.id) ?? false;
+      const isPublicNode = publicSet?.has(node.id) ?? false;
 
       // Skip creating a new object if nothing visual changed
       if (
@@ -1523,12 +1588,13 @@ function useLayerDetailGraph() {
         data.ownerColor === ownerColorVal &&
         data.isSingleOwner === isSingleOwner &&
         data.isChurnRisk === isChurnRiskNode &&
-        data.isInCycle === isInCycle
+        data.isInCycle === isInCycle &&
+        data.isPublic === isPublicNode
       ) {
         return node;
       }
 
-      return { ...node, data: { ...data, isHighlighted, searchScore, isSelected, isTourHighlighted, isNeighbor, isSelectionFaded, heat: complexityHeat, coverage, coverageTestCount, isTestImpacted, instrumentation, isSwallowed, errRole, ownerColor: ownerColorVal, isSingleOwner, isChurnRisk: isChurnRiskNode, isInCycle } };
+      return { ...node, data: { ...data, isHighlighted, searchScore, isSelected, isTourHighlighted, isNeighbor, isSelectionFaded, heat: complexityHeat, coverage, coverageTestCount, isTestImpacted, instrumentation, isSwallowed, errRole, ownerColor: ownerColorVal, isSingleOwner, isChurnRisk: isChurnRiskNode, isInCycle, isPublic: isPublicNode } };
     });
   }, [
     topo.nodes,
@@ -1552,6 +1618,7 @@ function useLayerDetailGraph() {
     ownerDimSet,
     churnRiskSet,
     cycleNodeIds,
+    publicSet,
   ]);
 
   // Replace aggregated edges incident to an expanded container with the
@@ -1596,6 +1663,7 @@ function useLayerDetailGraph() {
         out.push(buildDirectionalEdge(`inflated-${key}`, realSrc, realTgt, m, {
           resilience: resilienceMap?.get(`${m.source}->${m.target}`),
           inCycle: cycleEdgeKeys?.has(`${m.source}->${m.target}`) ?? false,
+          inViolation: violationEdgeKeys?.has(`${m.source}->${m.target}`) ?? false,
         }));
       }
     }
@@ -1610,6 +1678,7 @@ function useLayerDetailGraph() {
       out.push(buildDirectionalEdge(key, e.source, e.target, e, {
         resilience: resilienceMap?.get(`${e.source}->${e.target}`),
         inCycle: cycleEdgeKeys?.has(`${e.source}->${e.target}`) ?? false,
+        inViolation: violationEdgeKeys?.has(`${e.source}->${e.target}`) ?? false,
       }));
     }
     return out;
@@ -1620,6 +1689,7 @@ function useLayerDetailGraph() {
     topo.nodeToContainer,
     resilienceMap,
     cycleEdgeKeys,
+    violationEdgeKeys,
     expandedContainers,
   ]);
 
@@ -1755,6 +1825,21 @@ function GraphViewInner() {
   useEffect(() => {
     setEdges(initialEdges);
   }, [initialEdges, setEdges]);
+
+  // 300-series item 25: C4 boundary/zoom level. "File" expands every container
+  // (folders → individual file nodes inside nested boundary boxes); "Layer"
+  // collapses them back to atoms. "System" is handled by the toolbar (overview
+  // navigation). Reuses the existing container expand/collapse machinery.
+  const c4Level = useDashboardStore((s) => s.c4Level);
+  useEffect(() => {
+    if (navigationLevel !== "layer-detail") return;
+    if (!containerIds || containerIds.length === 0) return;
+    if (c4Level === "file") {
+      useDashboardStore.getState().expandAllContainers(containerIds);
+    } else if (c4Level === "layer") {
+      useDashboardStore.getState().collapseAllContainers();
+    }
+  }, [c4Level, navigationLevel, containerIds]);
 
   // Fit view on level/layer transitions. Layout is async (~125ms+ for
   // medium layers), so a fixed-delay timer can fire before positions
@@ -2202,6 +2287,8 @@ function GraphViewInner() {
       )}
       {/* 300-series item 48: churn × complexity hotspot quadrant panel */}
       <HotspotQuadrant />
+      {/* 300-series items 9-10/22/26: architecture & API-surface panel */}
+      <ArchitecturePanel />
     </div>
   );
 }

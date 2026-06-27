@@ -30,9 +30,37 @@ import {
   pushRecent,
   togglePinned as togglePinnedDest,
 } from "./utils/settingsPersist";
+import {
+  type BoundaryRule,
+  deriveDefaultRules,
+} from "./utils/archLayer";
 
 export type { OnboardingGoal };
 export type { AppSettings, RecentEntity, PinnedEntity };
+export type { BoundaryRule };
+
+// ── Architecture boundary rules (300-series item 26) ───────────────────────
+// Persisted per-project to localStorage (outside the workspace whitelist).
+const ARCH_RULES_KEY_PREFIX = "ua-arch-rules-v1:";
+function archRulesKey(projectKey: string): string {
+  return `${ARCH_RULES_KEY_PREFIX}${projectKey || "default"}`;
+}
+function loadArchRules(projectKey: string): BoundaryRule[] | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(archRulesKey(projectKey));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as BoundaryRule[];
+    if (Array.isArray(parsed)) return parsed;
+  } catch { /* ignore */ }
+  return null;
+}
+function saveArchRules(projectKey: string, rules: BoundaryRule[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(archRulesKey(projectKey), JSON.stringify(rules));
+  } catch { /* ignore */ }
+}
 
 /**
  * Item 190: a structural node id resolved (via shared filePath) to the domain
@@ -482,6 +510,30 @@ interface DashboardStore {
   toggleHotspotPanel: () => void;
   setHotspotPanelOpen: (open: boolean) => void;
 
+  // ── Architecture & API-surface tier (300-series items 9-10,21-22,25-26,28) ─
+  /** Item 26: editable layer-import boundary rules (persisted per project). */
+  archRules: BoundaryRule[];
+  /** Whether default "no upward deps" rules have been seeded for the graph. */
+  archRulesSeeded: boolean;
+  /** Item 26: highlight violating import edges in red + open the panel. Persisted. */
+  boundaryOverlay: boolean;
+  toggleBoundaryOverlay: () => void;
+  setArchRules: (rules: BoundaryRule[]) => void;
+  toggleArchRule: (id: string) => void;
+  addArchRule: (fromLayerId: string, toLayerId: string) => void;
+  removeArchRule: (id: string) => void;
+  resetArchRules: () => void;
+  /** Item 21: "public surface only" filter — collapse internal code nodes. */
+  publicSurfaceOnly: boolean;
+  togglePublicSurfaceOnly: () => void;
+  /** Item 25: C4 zoom level — System (overview) / Layer / File detail. */
+  c4Level: "system" | "layer" | "file";
+  setC4Level: (level: "system" | "layer" | "file") => void;
+  /** Items 9-10/22/26: Architecture panel (event-bus / API surface / rules) open. */
+  archPanelOpen: boolean;
+  toggleArchPanel: () => void;
+  setArchPanelOpen: (open: boolean) => void;
+
   setGraph: (graph: KnowledgeGraph) => void;
   selectNode: (nodeId: string | null) => void;
   navigateToNode: (nodeId: string) => void;
@@ -727,6 +779,8 @@ interface DashboardStore {
   expandContainer: (containerId: string) => void;
   collapseContainer: (containerId: string) => void;
   collapseAllContainers: () => void;
+  /** Item 25 (C4 File level): expand every container at once. */
+  expandAllContainers: (containerIds: string[]) => void;
   /** Container the user just manually expanded; viewport should lock onto it. Cleared by GraphView once the lock is applied. */
   pendingFocusContainer: string | null;
   setPendingFocusContainer: (containerId: string | null) => void;
@@ -1128,6 +1182,70 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   toggleHotspotPanel: () => set((s) => ({ hotspotPanelOpen: !s.hotspotPanelOpen })),
   setHotspotPanelOpen: (open) => set({ hotspotPanelOpen: open }),
 
+  // ── Architecture & API-surface tier (300-series) ──────────────────────────
+  archRules: [],
+  archRulesSeeded: false,
+  boundaryOverlay: readPersisted("ua-boundary-overlay-v1", ["on", "off"], "off") === "on",
+  toggleBoundaryOverlay: () =>
+    set((s) => {
+      const next = !s.boundaryOverlay;
+      persist("ua-boundary-overlay-v1", next ? "on" : "off");
+      return { boundaryOverlay: next };
+    }),
+  setArchRules: (rules) => {
+    saveArchRules(settingsProjectKey, rules);
+    set({ archRules: rules });
+  },
+  toggleArchRule: (id) =>
+    set((s) => {
+      const rules = s.archRules.map((r) =>
+        r.id === id ? { ...r, enabled: !r.enabled } : r,
+      );
+      saveArchRules(settingsProjectKey, rules);
+      return { archRules: rules };
+    }),
+  addArchRule: (fromLayerId, toLayerId) =>
+    set((s) => {
+      const id = `user:${fromLayerId}->${toLayerId}`;
+      if (s.archRules.some((r) => r.id === id)) return {};
+      const rules = [
+        ...s.archRules,
+        { id, fromLayerId, toLayerId, enabled: true, derived: false },
+      ];
+      saveArchRules(settingsProjectKey, rules);
+      return { archRules: rules };
+    }),
+  removeArchRule: (id) =>
+    set((s) => {
+      const rules = s.archRules.filter((r) => r.id !== id);
+      saveArchRules(settingsProjectKey, rules);
+      return { archRules: rules };
+    }),
+  resetArchRules: () =>
+    set((s) => {
+      const rules = s.graph ? deriveDefaultRules(s.graph) : [];
+      saveArchRules(settingsProjectKey, rules);
+      return { archRules: rules };
+    }),
+  publicSurfaceOnly: false,
+  togglePublicSurfaceOnly: () =>
+    set((s) => ({
+      publicSurfaceOnly: !s.publicSurfaceOnly,
+      // Visibility filter changes the visible node set → drop container caches.
+      containerLayoutCache: new Map(),
+      containerSizeMemory: new Map(),
+      expandedContainers: new Set(),
+      pendingFocusContainer: null,
+    })),
+  c4Level: readPersisted("ua-c4-level-v1", ["system", "layer", "file"], "layer"),
+  setC4Level: (level) => {
+    persist("ua-c4-level-v1", level);
+    set({ c4Level: level });
+  },
+  archPanelOpen: false,
+  toggleArchPanel: () => set((s) => ({ archPanelOpen: !s.archPanelOpen })),
+  setArchPanelOpen: (open) => set({ archPanelOpen: open }),
+
   setGraph: (graph) => {
     const searchEngine = new SearchEngine(graph.nodes);
     const query = get().searchQuery;
@@ -1137,12 +1255,18 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     const keepDomainView = viewMode === "domain" && domainGraph !== null;
     const { nodesById, nodeIdToLayerId, nodeIdToLayerIds, filePathToNodeId } =
       buildGraphIndexes(graph);
+    // Item 26: seed boundary rules from persisted state, else derive "no upward
+    // deps" defaults from the layer order.
+    const persistedRules = loadArchRules(settingsProjectKey);
+    const archRules = persistedRules ?? deriveDefaultRules(graph);
     set({
       graph,
       nodesById,
       nodeIdToLayerId,
       nodeIdToLayerIds,
       filePathToNodeId,
+      archRules,
+      archRulesSeeded: true,
       // Item 190: rebuild the domain-step index against the new structural index
       // (no-op if the domain graph hasn't loaded yet; setDomainGraph rebuilds it).
       nodeIdToDomainStep: buildNodeIdToDomainStep(domainGraph, filePathToNodeId),
@@ -1706,11 +1830,18 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     settingsProjectKey = learningProjectKey;
     const settings = loadSettings(settingsProjectKey);
     const destinations = loadDestinations(settingsProjectKey);
+    // Item 26: now that the project key is known, hydrate persisted boundary
+    // rules (falling back to the freshly-derived defaults if none saved yet).
+    const persistedRules = loadArchRules(settingsProjectKey);
+    const archRules =
+      persistedRules ??
+      (get().graph ? deriveDefaultRules(get().graph!) : get().archRules);
     set({
       learning: loadLearning(learningProjectKey),
       learningLoaded: true,
       settings,
       destinations,
+      archRules,
       // Apply persisted trace defaults at load.
       traceDepth: Math.max(1, Math.min(6, settings.defaultTraceDepth)),
       traceDirection: settings.defaultTraceDirection,
@@ -2052,6 +2183,8 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       return { expandedContainers: next };
     }),
   collapseAllContainers: () => set({ expandedContainers: new Set() }),
+  expandAllContainers: (containerIds) =>
+    set({ expandedContainers: new Set(containerIds) }),
 
   containerLayoutCache: new Map(),
   setContainerLayout: (containerId, childPositions, actualSize) =>
