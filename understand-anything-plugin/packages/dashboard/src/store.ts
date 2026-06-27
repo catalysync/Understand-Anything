@@ -461,6 +461,27 @@ interface DashboardStore {
   erdAttrLevel: "all" | "keys" | "names";
   setErdAttrLevel: (level: "all" | "keys" | "names") => void;
 
+  // ── Git-metadata overlays (300-series items 27/48/51/108) ─────────────────
+  /** Item 51: ownership overlay mode (off / owner-hue / single-owner-flag). Persisted. */
+  ownershipOverlay: "off" | "owner" | "single-owner";
+  setOwnershipOverlay: (mode: "off" | "owner" | "single-owner") => void;
+  /** Item 51/118: when set, dim everything NOT owned by this owner ("show owner's code"). */
+  ownerFilter: string | null;
+  setOwnerFilter: (owner: string | null) => void;
+  /** Item 27: highlight import-cycle nodes/edges in red. Persisted. */
+  cyclesOverlay: boolean;
+  toggleCyclesOverlay: () => void;
+  /** Item 27: restrict the canvas to cycle-involved nodes only. */
+  cyclesOnly: boolean;
+  toggleCyclesOnly: () => void;
+  /** Item 108: stamp resilience glyphs on calls edges to guarded callees. Persisted. */
+  resilienceBadges: boolean;
+  toggleResilienceBadges: () => void;
+  /** Item 48: churn × complexity hotspot quadrant panel open. */
+  hotspotPanelOpen: boolean;
+  toggleHotspotPanel: () => void;
+  setHotspotPanelOpen: (open: boolean) => void;
+
   setGraph: (graph: KnowledgeGraph) => void;
   selectNode: (nodeId: string | null) => void;
   navigateToNode: (nodeId: string) => void;
@@ -1064,6 +1085,48 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     persist("ua-erd-attr-level-v1", level);
     set({ erdAttrLevel: level });
   },
+
+  // ── Git-metadata overlays (300-series items 27/48/51/108) ─────────────────
+  ownershipOverlay: readPersisted("ua-ownership-overlay-v1", ["off", "owner", "single-owner"], "off"),
+  setOwnershipOverlay: (mode) => {
+    persist("ua-ownership-overlay-v1", mode);
+    set({ ownershipOverlay: mode });
+  },
+  ownerFilter: null,
+  setOwnerFilter: (owner) => set({ ownerFilter: owner }),
+  cyclesOverlay: readPersisted("ua-cycles-overlay-v1", ["on", "off"], "off") === "on",
+  toggleCyclesOverlay: () =>
+    set((s) => {
+      const next = !s.cyclesOverlay;
+      persist("ua-cycles-overlay-v1", next ? "on" : "off");
+      // Turning the overlay off also exits cycles-only mode.
+      return { cyclesOverlay: next, cyclesOnly: next ? s.cyclesOnly : false };
+    }),
+  cyclesOnly: false,
+  toggleCyclesOnly: () =>
+    set((s) => {
+      const next = !s.cyclesOnly;
+      // cycles-only implies the overlay is on (so the user sees the red highlight),
+      // and changing the visible node set drops the container caches.
+      return {
+        cyclesOnly: next,
+        cyclesOverlay: next ? true : s.cyclesOverlay,
+        containerLayoutCache: new Map(),
+        containerSizeMemory: new Map(),
+        expandedContainers: new Set(),
+        pendingFocusContainer: null,
+      };
+    }),
+  resilienceBadges: readPersisted("ua-resilience-badges-v1", ["on", "off"], "on") === "on",
+  toggleResilienceBadges: () =>
+    set((s) => {
+      const next = !s.resilienceBadges;
+      persist("ua-resilience-badges-v1", next ? "on" : "off");
+      return { resilienceBadges: next };
+    }),
+  hotspotPanelOpen: false,
+  toggleHotspotPanel: () => set((s) => ({ hotspotPanelOpen: !s.hotspotPanelOpen })),
+  setHotspotPanelOpen: (open) => set({ hotspotPanelOpen: open }),
 
   setGraph: (graph) => {
     const searchEngine = new SearchEngine(graph.nodes);

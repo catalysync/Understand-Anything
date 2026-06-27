@@ -161,6 +161,14 @@ export interface CustomNodeData extends Record<string, unknown> {
   isSwallowed?: boolean;
   /** 300-series items 92-94: error-propagation highlight roles. */
   errRole?: "raise" | "path" | "handler" | null;
+  /** 300-series item 51: ownership overlay fill (owner-hue OR single-owner flag). */
+  ownerColor?: string | null;
+  /** 300-series item 51: single-owner complex hotspot flag (single-owner mode). */
+  isSingleOwner?: boolean;
+  /** 300-series item 117: churn-risk ("suspect commit") — high churn + raises. */
+  isChurnRisk?: boolean;
+  /** 300-series item 27: node participates in an import cycle. */
+  isInCycle?: boolean;
 }
 
 // 300-series item 39: tri-state coverage palette (green / amber / red).
@@ -192,9 +200,11 @@ function CustomNodeComponent({
     ? coverageColor
     : instrColor
       ? instrColor
-      : data.heat
-        ? complexityHeatColors[data.complexity] ?? complexityHeatColors.simple
-        : typeColors[knownType] ?? typeColors.file;
+      : data.ownerColor
+        ? data.ownerColor
+        : data.heat
+          ? complexityHeatColors[data.complexity] ?? complexityHeatColors.simple
+          : typeColors[knownType] ?? typeColors.file;
   const textColor = typeTextColors[knownType] ?? typeTextColors.file;
   const complexityColor = complexityColors[data.complexity] ?? complexityColors.simple;
   const lod = data.lod ?? "full";
@@ -249,6 +259,15 @@ function CustomNodeComponent({
     extraClass += " ring-2 ring-[#5a9e6f]";
   } else if (data.errRole === "path") {
     extraClass += " ring-1 ring-[#d35d6e]/50";
+  }
+
+  // 300-series item 27: import-cycle members ring in red.
+  if (data.isInCycle) {
+    extraClass += " ring-2 ring-[#d35d6e]";
+  }
+  // 300-series item 51: single-owner complex hotspot flag (amber dashed ring).
+  if (data.isSingleOwner) {
+    extraClass += " ring-2 ring-[#d4a574]/70";
   }
 
   const name = data.label ?? "unnamed";
@@ -310,6 +329,16 @@ function CustomNodeComponent({
             {data.nodeType}
           </span>
           <div className="flex items-center gap-1.5">
+            {data.isChurnRisk && (
+              <span
+                className="text-[8px] font-bold uppercase px-1 rounded bg-[#d35d6e]/15 text-[#d35d6e] leading-none"
+                role="img"
+                aria-label="Suspect commit — high churn and raises an error"
+                title="Suspect commit — high churn AND raises an error (churn-risk)"
+              >
+                ⚠ churn
+              </span>
+            )}
             {data.isSwallowed && (
               <span
                 className="text-[10px] leading-none text-[#d4a574]"

@@ -33,6 +33,14 @@ import {
   CODE_TYPES,
 } from "../utils/opsLayer";
 import type { GraphNode, KnowledgeGraph } from "@understand-anything/core/types";
+import {
+  gitMetaFor,
+  maxChurn,
+  formatCommitDate,
+  isChurnRisk,
+  ownerColor,
+  nodeIdsForOwner,
+} from "../utils/gitMeta";
 
 type DeepTab = "overview" | "structure" | "usages" | "tests" | "ops" | "computed" | "history" | "owners";
 
@@ -398,6 +406,221 @@ function ComputedTab({ node, graph }: { node: GraphNode; graph: KnowledgeGraph }
   );
 }
 
+// ── History tab (item 117) ──────────────────────────────────────────────────
+function HistoryTab({ node, graph }: { node: GraphNode; graph: KnowledgeGraph }) {
+  const meta = useMemo(() => gitMetaFor(node), [node]);
+  const repoMaxChurn = useMemo(() => maxChurn(graph), [graph]);
+  const churnRisk = useMemo(() => isChurnRisk(graph, node.id), [graph, node.id]);
+
+  if (!meta) {
+    return (
+      <EmptyHint>
+        No git metadata indexed for <span className="font-mono">{node.filePath ?? node.name}</span>.
+        <br /><span className="opacity-70">Re-run <span className="font-mono">/understand</span> with git enrichment to populate commit history.</span>
+      </EmptyHint>
+    );
+  }
+
+  const date = formatCommitDate(meta.lastCommitAt);
+  const churnPct = repoMaxChurn > 0 ? Math.min(100, Math.round((meta.churn / repoMaxChurn) * 100)) : 0;
+  const topMax = meta.topAuthors.reduce((m, a) => Math.max(m, a.c), 0) || 1;
+
+  return (
+    <div className="px-4 py-3 space-y-4">
+      {churnRisk && (
+        <div className="flex items-center gap-2 rounded-lg border border-[#d35d6e]/40 bg-[#d35d6e]/10 px-3 py-2">
+          <span className="text-[#d35d6e]" aria-hidden>⚠</span>
+          <div className="text-[11px] text-text-secondary leading-snug">
+            <span className="font-semibold text-[#d35d6e]">Suspect commit</span> — high churn and raises an error.
+            Changes here are a likely regression source.
+          </div>
+        </div>
+      )}
+
+      {/* Last commit */}
+      <div>
+        <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5">Last commit</div>
+        <div className="space-y-1.5 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-text-muted w-16 shrink-0">Author</span>
+            <span className="text-text-primary truncate">{meta.lastAuthor ?? "—"}</span>
+          </div>
+          {meta.lastCommit && (
+            <div className="flex items-center gap-2">
+              <span className="text-text-muted w-16 shrink-0">Commit</span>
+              <span className="font-mono text-accent">{meta.lastCommit.slice(0, 8)}</span>
+            </div>
+          )}
+          {date && (
+            <div className="flex items-center gap-2">
+              <span className="text-text-muted w-16 shrink-0">When</span>
+              <span className="text-text-primary">{date.rel}</span>
+              <span className="text-text-muted text-[10px]">({date.abs})</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Churn bar */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-[10px] uppercase tracking-wider text-text-muted">Churn</span>
+          <span className="text-xs font-mono text-text-primary">{meta.churn} commit{meta.churn === 1 ? "" : "s"}</span>
+        </div>
+        <div className="h-2 rounded-full bg-elevated overflow-hidden border border-border-subtle">
+          <div
+            className="h-full rounded-full"
+            style={{
+              width: `${churnPct}%`,
+              backgroundColor: churnPct > 66 ? "#c97070" : churnPct > 33 ? "#d4a574" : "#5a9e6f",
+            }}
+          />
+        </div>
+        <div className="text-[10px] text-text-muted mt-1">{churnPct}% of repo max ({repoMaxChurn})</div>
+      </div>
+
+      {/* Top authors */}
+      {meta.topAuthors.length > 0 && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5">
+            Top authors ({meta.topAuthors.length})
+          </div>
+          <div className="space-y-1.5">
+            {meta.topAuthors.map((a) => (
+              <div key={a.a} className="flex items-center gap-2 text-xs">
+                <span
+                  className="w-2 h-2 rounded-full shrink-0"
+                  style={{ backgroundColor: ownerColor(a.a) }}
+                />
+                <span className="text-text-primary truncate flex-1">{a.a}</span>
+                <div className="w-20 h-1.5 rounded-full bg-elevated overflow-hidden border border-border-subtle shrink-0">
+                  <div
+                    className="h-full"
+                    style={{ width: `${Math.round((a.c / topMax) * 100)}%`, backgroundColor: ownerColor(a.a) }}
+                  />
+                </div>
+                <span className="font-mono text-text-muted w-6 text-right shrink-0">{a.c}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Owners tab (item 118) ────────────────────────────────────────────────────
+function OwnersTab({ node, graph }: { node: GraphNode; graph: KnowledgeGraph }) {
+  const meta = useMemo(() => gitMetaFor(node), [node]);
+  const ownershipOverlay = useDashboardStore((s) => s.ownershipOverlay);
+  const setOwnershipOverlay = useDashboardStore((s) => s.setOwnershipOverlay);
+  const setOwnerFilter = useDashboardStore((s) => s.setOwnerFilter);
+  const ownerFilter = useDashboardStore((s) => s.ownerFilter);
+
+  const ownerCount = useMemo(() => (meta?.owner ? nodeIdsForOwner(graph, meta.owner).size : 0), [graph, meta]);
+
+  if (!meta || (!meta.owner && meta.topAuthors.length === 0)) {
+    return (
+      <EmptyHint>
+        No ownership metadata for <span className="font-mono">{node.filePath ?? node.name}</span>.
+        <br /><span className="opacity-70">Enrich the graph with git blame / <span className="font-mono">CODEOWNERS</span> to populate owners.</span>
+      </EmptyHint>
+    );
+  }
+
+  const busFactor = meta.busFactor ?? meta.topAuthors.length;
+  const whoToAsk = meta.owner ?? meta.topAuthors[0]?.a ?? null;
+  const showingThisOwner = ownerFilter !== null && ownerFilter === meta.owner;
+
+  return (
+    <div className="px-4 py-3 space-y-4">
+      {/* Owner chip + bus factor */}
+      <div className="flex flex-wrap items-center gap-2">
+        {meta.owner && (
+          <span
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold"
+            style={{ color: ownerColor(meta.owner), backgroundColor: `${ownerColor(meta.owner)}22` }}
+          >
+            <span aria-hidden>👤</span>{meta.owner}
+          </span>
+        )}
+        <span
+          className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+            busFactor === 1 ? "bg-[#c97070]/15 text-[#c97070]" : "bg-elevated text-text-secondary border border-border-subtle"
+          }`}
+          title="Bus factor — number of authors who own the bulk of this code"
+        >
+          {busFactor} author{busFactor === 1 ? "" : "s"} · bus factor {busFactor}
+        </span>
+      </div>
+
+      {busFactor === 1 && (
+        <div className="text-[11px] text-[#c97070] leading-snug bg-[#c97070]/10 border border-[#c97070]/30 rounded-lg px-3 py-2">
+          Single-owner risk — knowledge of this file is concentrated in one person. Consider pairing / docs.
+        </div>
+      )}
+
+      {/* Who to ask */}
+      {whoToAsk && (
+        <div className="rounded-lg border border-border-subtle bg-elevated px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted mb-0.5">Who to ask</div>
+          <div className="text-xs text-text-primary flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: ownerColor(whoToAsk) }} />
+            {whoToAsk}
+            <span className="text-text-muted">— most commits / blame on this code</span>
+          </div>
+        </div>
+      )}
+
+      {/* Top authors with commit counts */}
+      {meta.topAuthors.length > 0 && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1.5">
+            Authors by commits
+          </div>
+          <div className="space-y-1">
+            {meta.topAuthors.map((a) => (
+              <div key={a.a} className="flex items-center gap-2 text-xs bg-elevated rounded-lg px-2.5 py-1.5 border border-border-subtle">
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: ownerColor(a.a) }} />
+                <span className="text-text-primary truncate flex-1">{a.a}</span>
+                <span className="font-mono text-text-muted">{a.c} commit{a.c === 1 ? "" : "s"}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Show this owner's code (graph filter/affordance) */}
+      {meta.owner && (
+        <div className="space-y-2">
+          <button
+            type="button"
+            onClick={() => setOwnerFilter(showingThisOwner ? null : meta.owner)}
+            className={`w-full text-xs font-semibold px-3 py-2 rounded-lg border transition-colors ${
+              showingThisOwner
+                ? "border-accent/50 bg-accent/15 text-accent"
+                : "border-border-medium bg-elevated text-text-secondary hover:text-text-primary"
+            }`}
+          >
+            {showingThisOwner ? "Showing this owner's code — clear" : `Show this owner's code (${ownerCount} file${ownerCount === 1 ? "" : "s"})`}
+          </button>
+          <button
+            type="button"
+            onClick={() => setOwnershipOverlay(ownershipOverlay === "owner" ? "off" : "owner")}
+            className={`w-full text-[11px] px-3 py-1.5 rounded-lg border transition-colors ${
+              ownershipOverlay === "owner"
+                ? "border-accent/50 bg-accent/10 text-accent"
+                : "border-border-subtle bg-elevated text-text-muted hover:text-text-secondary"
+            }`}
+          >
+            {ownershipOverlay === "owner" ? "Hide ownership overlay" : "Color graph by owner"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main tabbed inspector ──────────────────────────────────────────────────
 export default function NodeInspectorTabs() {
   const graph = useDashboardStore((s) => s.graph);
@@ -412,8 +635,11 @@ export default function NodeInspectorTabs() {
   // Which tabs have data? (Overview always; History/Owners always show honest
   // empty states; the rest hide when empty.)
   const tabsWithData = useMemo(() => {
-    const set = new Set<DeepTab>(["overview", "history", "owners", "computed"]);
+    // History/Owners only appear when the node actually carries git metadata;
+    // otherwise the (now-real) tabs would just render an empty state.
+    const set = new Set<DeepTab>(["overview", "computed"]);
     if (!activeGraph || !node) return set;
+    if (gitMetaFor(node) !== null) { set.add("history"); set.add("owners"); }
     if (symbolChildren(activeGraph, node.id).length > 0) set.add("structure");
     if (usagesForNode(activeGraph, node.id).length > 0) set.add("usages");
     const isCode = CODE_TYPES.has(node.type);
@@ -471,17 +697,8 @@ export default function NodeInspectorTabs() {
         {tab === "tests" && <TestsTab node={node} graph={activeGraph} />}
         {tab === "ops" && <OpsTab node={node} graph={activeGraph} />}
         {tab === "computed" && <ComputedTab node={node} graph={activeGraph} />}
-        {tab === "history" && (
-          <EmptyHint>
-            Commit history requires git metadata, which is not indexed in the knowledge graph.
-            <br /><span className="opacity-70">Run <span className="font-mono">git log</span> on <span className="font-mono">{node.filePath ?? "this file"}</span> to view it.</span>
-          </EmptyHint>
-        )}
-        {tab === "owners" && (
-          <EmptyHint>
-            Code ownership requires a <span className="font-mono">CODEOWNERS</span> file / git blame, which is not indexed in the knowledge graph.
-          </EmptyHint>
-        )}
+        {tab === "history" && <HistoryTab node={node} graph={activeGraph} />}
+        {tab === "owners" && <OwnersTab node={node} graph={activeGraph} />}
       </div>
     </div>
   );

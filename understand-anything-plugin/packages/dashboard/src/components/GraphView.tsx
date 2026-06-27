@@ -23,6 +23,7 @@ import type { PortalFlowNode } from "./PortalNode";
 import ContainerNode from "./ContainerNode";
 import type { ContainerFlowNode, ContainerNodeData } from "./ContainerNode";
 import Breadcrumb from "./Breadcrumb";
+import HotspotQuadrant from "./HotspotQuadrant";
 import { useDashboardStore } from "../store";
 import type {
   GraphEdge,
@@ -60,6 +61,16 @@ import { deriveContainers } from "../utils/containers";
 import type { DerivedContainer } from "../utils/containers";
 import { computeLayerStats } from "../utils/layerStats";
 import { reachableFrom, deadCodeSet, buildCoverageInfo, impactedTests, hasCoverageData, errorPropagation, swallowedErrorNodeIds, buildInstrumentationInfo, hasInstrumentationData } from "../utils/opsLayer";
+import {
+  buildOwnershipOverlay,
+  churnRiskIds,
+  detectImportCycles,
+  resilienceEdgeMap,
+  RESILIENCE_GLYPH,
+  RESILIENCE_LABEL,
+  nodeIdsForOwner,
+} from "../utils/gitMeta";
+import type { ResilienceKind } from "../utils/gitMeta";
 
 const nodeTypes = {
   custom: CustomNode,
@@ -453,6 +464,8 @@ function useLayerDetailTopology(): LayerDetailTopology & {
   const declutterLeaves = useDashboardStore((s) => s.declutterLeaves);
   const complexityRange = useDashboardStore((s) => s.complexityRange);
   const tagFilter = useDashboardStore((s) => s.tagFilter);
+  // 300-series item 27: cycles-only filtered view (restrict to cycle members).
+  const cyclesOnly = useDashboardStore((s) => s.cyclesOnly);
 
   const handleNodeSelect = useCallback(
     (nodeId: string) => {
@@ -542,6 +555,14 @@ function useLayerDetailTopology(): LayerDetailTopology & {
       filteredGraphNodes = filteredGraphNodes.filter((n) =>
         (n.tags ?? []).some((tg) => tagFilter.has(tg)),
       );
+    }
+
+    // 300-series item 27: cycles-only view — restrict to nodes that participate
+    // in an import cycle. Computed over the WHOLE graph's import edges so the
+    // surviving set is the true cycle membership regardless of layer.
+    if (cyclesOnly) {
+      const cycleIds = detectImportCycles(graph).nodeIds;
+      filteredGraphNodes = filteredGraphNodes.filter((n) => cycleIds.has(n.id));
     }
 
     // Item 48: declutter — drop low-degree leaf nodes (degree ≤ 1 within the
@@ -770,6 +791,7 @@ function useLayerDetailTopology(): LayerDetailTopology & {
     complexityRange,
     tagFilter,
     declutterLeaves,
+    cyclesOnly,
     handleNodeSelect,
     handleContainerToggle,
   ]);
@@ -1099,13 +1121,22 @@ function buildDirectionalEdge(
   source: string,
   target: string,
   edge: GraphEdge,
+  opts?: {
+    /** 300-series item 108: resilience glyphs to stamp (callee guarded). */
+    resilience?: ResilienceKind[];
+    /** 300-series item 27: edge is inside an import cycle → red. */
+    inCycle?: boolean;
+  },
 ): Edge {
   const weight = typeof edge.weight === "number" ? edge.weight : 0.5;
   // 1.2px (weak) → ~4px (strong) — keeps thin edges visible while letting
   // heavy dependencies read as bolder.
   const strokeWidth = 1.2 + Math.max(0, Math.min(1, weight)) * 2.8;
   const dir = edge.direction ?? "forward";
-  const marker = { type: MarkerType.ArrowClosed, color: "#a39787", width: 16, height: 16 };
+  const inCycle = opts?.inCycle ?? false;
+  const markerColor = inCycle ? "#d35d6e" : "#a39787";
+  const marker = { type: MarkerType.ArrowClosed, color: markerColor, width: 16, height: 16 };
+  const res = opts?.resilience ?? [];
   return {
     id,
     source,
@@ -1113,8 +1144,15 @@ function buildDirectionalEdge(
     type: "directional",
     markerEnd: dir === "forward" || dir === "bidirectional" ? marker : undefined,
     markerStart: dir === "backward" || dir === "bidirectional" ? marker : undefined,
-    style: { stroke: "rgba(212,165,116,0.55)", strokeWidth },
-    data: { description: edge.description, edgeLabel: edge.type },
+    style: inCycle
+      ? { stroke: "#d35d6e", strokeWidth: Math.max(2, strokeWidth) }
+      : { stroke: "rgba(212,165,116,0.55)", strokeWidth },
+    data: {
+      description: edge.description,
+      edgeLabel: edge.type,
+      resilienceGlyphs: res.length > 0 ? res.map((k) => RESILIENCE_GLYPH[k]).join("") : undefined,
+      resilienceLabel: res.length > 0 ? res.map((k) => RESILIENCE_LABEL[k]).join(" · ") : undefined,
+    },
   };
 }
 
@@ -1156,6 +1194,10 @@ function useLayerDetailGraph() {
   const errorPropRootId = useDashboardStore((s) => s.errorPropRootId);
   const swallowedMarkers = useDashboardStore((s) => s.swallowedMarkers);
   const instrumentationHeat = useDashboardStore((s) => s.instrumentationHeat);
+  // 300-series items 27/51: ownership overlay + owner filter + cycles highlight.
+  const ownershipOverlay = useDashboardStore((s) => s.ownershipOverlay);
+  const ownerFilter = useDashboardStore((s) => s.ownerFilter);
+  const cyclesOverlay = useDashboardStore((s) => s.cyclesOverlay);
   const graph = useDashboardStore((s) => s.graph);
 
   const handleNodeSelect = useCallback(
@@ -1326,6 +1368,40 @@ function useLayerDetailGraph() {
     [graph, instrumentationHeat],
   );
 
+  // 300-series item 51: ownership overlay (owner-hue OR single-owner flag).
+  const ownership = useMemo(
+    () => (graph && ownershipOverlay !== "off" ? buildOwnershipOverlay(graph, ownershipOverlay) : null),
+    [graph, ownershipOverlay],
+  );
+
+  // 300-series item 51/118: owner filter dim set ("show this owner's code").
+  const ownerDimSet = useMemo(() => {
+    if (!graph || !ownerFilter) return null;
+    const owned = nodeIdsForOwner(graph, ownerFilter);
+    if (owned.size === 0) return null;
+    const dim = new Set<string>();
+    for (const n of graph.nodes) if (!owned.has(n.id)) dim.add(n.id);
+    return dim;
+  }, [graph, ownerFilter]);
+
+  // 300-series item 117: churn-risk ("suspect commit") node set.
+  const churnRiskSet = useMemo(() => (graph ? churnRiskIds(graph) : null), [graph]);
+
+  // 300-series item 27: import-cycle node + edge sets (only when overlay on).
+  const cycles = useMemo(
+    () => (graph && cyclesOverlay ? detectImportCycles(graph) : null),
+    [graph, cyclesOverlay],
+  );
+  const cycleNodeIds = cycles?.nodeIds ?? null;
+  const cycleEdgeKeys = cycles?.edgeKeys ?? null;
+
+  // 300-series item 108: resilience-badge edge map (only when badges on).
+  const resilienceBadges = useDashboardStore((s) => s.resilienceBadges);
+  const resilienceMap = useMemo(
+    () => (graph && resilienceBadges ? resilienceEdgeMap(graph) : null),
+    [graph, resilienceBadges],
+  );
+
   // Combine Stage 1 nodes with Stage 2 expanded children, then apply the
   // visual overlay (selection, search, tour) to every CustomFlowNode in
   // the combined set. Container nodes get their own overlay branch.
@@ -1394,8 +1470,11 @@ function useLayerDetailGraph() {
       // Reachability/dead-code dim composes with selection fade: a node is faded
       // if selection-unrelated OR (overlay active and the node is in the dim set).
       const isReachDimmed = reachDimSet !== null && reachDimSet.has(node.id);
+      const isOwnerDimmed = ownerDimSet !== null && ownerDimSet.has(node.id);
       const isSelectionFaded =
-        (hasSelection && !neighborNodeIds.has(node.id)) || (isReachDimmed && !isSelected);
+        (hasSelection && !neighborNodeIds.has(node.id)) ||
+        (isReachDimmed && !isSelected) ||
+        (isOwnerDimmed && !isSelected);
 
       const data = node.data as CustomFlowNode["data"];
 
@@ -1419,6 +1498,13 @@ function useLayerDetailGraph() {
               : null
         : null;
 
+      // 300-series items 27/51/117: ownership color, single-owner flag,
+      // churn-risk badge, cycle membership.
+      const ownerColorVal = ownership?.colorById.get(node.id) ?? null;
+      const isSingleOwner = ownership ? ownership.flaggedIds.has(node.id) : false;
+      const isChurnRiskNode = churnRiskSet?.has(node.id) ?? false;
+      const isInCycle = cycleNodeIds?.has(node.id) ?? false;
+
       // Skip creating a new object if nothing visual changed
       if (
         data.isHighlighted === isHighlighted &&
@@ -1433,12 +1519,16 @@ function useLayerDetailGraph() {
         data.isTestImpacted === isTestImpacted &&
         data.instrumentation === instrumentation &&
         data.isSwallowed === isSwallowed &&
-        data.errRole === errRole
+        data.errRole === errRole &&
+        data.ownerColor === ownerColorVal &&
+        data.isSingleOwner === isSingleOwner &&
+        data.isChurnRisk === isChurnRiskNode &&
+        data.isInCycle === isInCycle
       ) {
         return node;
       }
 
-      return { ...node, data: { ...data, isHighlighted, searchScore, isSelected, isTourHighlighted, isNeighbor, isSelectionFaded, heat: complexityHeat, coverage, coverageTestCount, isTestImpacted, instrumentation, isSwallowed, errRole } };
+      return { ...node, data: { ...data, isHighlighted, searchScore, isSelected, isTourHighlighted, isNeighbor, isSelectionFaded, heat: complexityHeat, coverage, coverageTestCount, isTestImpacted, instrumentation, isSwallowed, errRole, ownerColor: ownerColorVal, isSingleOwner, isChurnRisk: isChurnRiskNode, isInCycle } };
     });
   }, [
     topo.nodes,
@@ -1458,6 +1548,10 @@ function useLayerDetailGraph() {
     instrumentationInfo,
     swallowedSet,
     errorProp,
+    ownership,
+    ownerDimSet,
+    churnRiskSet,
+    cycleNodeIds,
   ]);
 
   // Replace aggregated edges incident to an expanded container with the
@@ -1499,7 +1593,10 @@ function useLayerDetailGraph() {
         const key = `${realSrc}|${realTgt}|${m.type}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        out.push(buildDirectionalEdge(`inflated-${key}`, realSrc, realTgt, m));
+        out.push(buildDirectionalEdge(`inflated-${key}`, realSrc, realTgt, m, {
+          resilience: resilienceMap?.get(`${m.source}->${m.target}`),
+          inCycle: cycleEdgeKeys?.has(`${m.source}->${m.target}`) ?? false,
+        }));
       }
     }
     // Add intra-container edges for each expanded container so the user
@@ -1510,7 +1607,10 @@ function useLayerDetailGraph() {
       const key = `intra|${e.source}|${e.target}|${e.type}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push(buildDirectionalEdge(key, e.source, e.target, e));
+      out.push(buildDirectionalEdge(key, e.source, e.target, e, {
+        resilience: resilienceMap?.get(`${e.source}->${e.target}`),
+        inCycle: cycleEdgeKeys?.has(`${e.source}->${e.target}`) ?? false,
+      }));
     }
     return out;
   }, [
@@ -1518,6 +1618,8 @@ function useLayerDetailGraph() {
     topo.filteredEdges,
     topo.intraContainer,
     topo.nodeToContainer,
+    resilienceMap,
+    cycleEdgeKeys,
     expandedContainers,
   ]);
 
@@ -1568,6 +1670,26 @@ function GraphViewInner() {
   // 300-series item 99/101-102: instrumentation heat legend state.
   const instrumentationHeatOn = useDashboardStore((s) => s.instrumentationHeat);
   const graphHasInstrumentation = useMemo(() => hasInstrumentationData(graph), [graph]);
+  // 300-series items 27/51/118: git-overlay legends + owner filter banner.
+  const ownershipOverlayMode = useDashboardStore((s) => s.ownershipOverlay);
+  const ownerFilter = useDashboardStore((s) => s.ownerFilter);
+  const setOwnerFilter = useDashboardStore((s) => s.setOwnerFilter);
+  const cyclesOverlayOn = useDashboardStore((s) => s.cyclesOverlay);
+  const cyclesOnlyOn = useDashboardStore((s) => s.cyclesOnly);
+  const ownershipLegend = useMemo(
+    () => (graph && ownershipOverlayMode !== "off" ? buildOwnershipOverlay(graph, ownershipOverlayMode) : null),
+    [graph, ownershipOverlayMode],
+  );
+  const cyclesData = useMemo(
+    () => (graph && (cyclesOverlayOn || cyclesOnlyOn) ? detectImportCycles(graph) : null),
+    [graph, cyclesOverlayOn, cyclesOnlyOn],
+  );
+  const nodeNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    if (graph) for (const n of graph.nodes) m.set(n.id, n.name);
+    return m;
+  }, [graph]);
+  const focusEntity = useDashboardStore((s) => s.focusEntity);
   // 300-series items 92-94: error-propagation banner state.
   const errorPropRootId = useDashboardStore((s) => s.errorPropRootId);
   const setErrorPropRoot = useDashboardStore((s) => s.setErrorPropRoot);
@@ -1945,6 +2067,81 @@ function GraphViewInner() {
           )}
         </div>
       )}
+      {/* 300-series item 51: ownership overlay legend */}
+      {ownershipLegend && (
+        <div className="absolute bottom-4 right-4 z-10 rounded-lg border border-border-subtle bg-surface/90 px-3 py-2 shadow-xl backdrop-blur-sm max-w-[200px]">
+          <div className="text-[9px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">
+            {ownershipOverlayMode === "owner" ? "Ownership" : "Single-owner hotspots"}
+          </div>
+          {ownershipOverlayMode === "owner" ? (
+            ownershipLegend.owners.length > 0 ? (
+              <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
+                {ownershipLegend.owners.slice(0, 12).map((o) => (
+                  <button
+                    key={o.owner}
+                    type="button"
+                    onClick={() => setOwnerFilter(ownerFilter === o.owner ? null : o.owner)}
+                    className={`flex items-center gap-1.5 text-[10px] text-left transition-colors ${
+                      ownerFilter === o.owner ? "text-accent font-semibold" : "text-text-secondary hover:text-text-primary"
+                    }`}
+                    title={`Show only ${o.owner}'s code`}
+                  >
+                    <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: o.color }} />
+                    <span className="truncate flex-1">{o.owner}</span>
+                    <span className="text-text-muted shrink-0">{o.count}</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="text-[10px] text-text-muted">No owner metadata in the graph yet.</div>
+            )
+          ) : (
+            <div className="flex items-center gap-1.5 text-[10px] text-text-secondary">
+              <span className="w-2.5 h-2.5 rounded-sm shrink-0 ring-1 ring-[#d35d6e]" style={{ backgroundColor: "#d4a574" }} />
+              busFactor 1 + complex ({ownershipLegend.flaggedIds.size})
+            </div>
+          )}
+        </div>
+      )}
+      {/* 300-series item 27: cycles list panel (paths) */}
+      {cyclesData && (
+        <div className="absolute top-16 left-4 z-10 rounded-lg border border-[#d35d6e]/40 bg-surface/95 px-3 py-2 shadow-xl backdrop-blur-sm max-w-[280px]">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[9px] font-semibold uppercase tracking-wider text-[#d35d6e]">
+              Import cycles ({cyclesData.cycles.length})
+            </span>
+            <button
+              type="button"
+              onClick={() => useDashboardStore.getState().toggleCyclesOnly()}
+              className={`text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border transition-colors ${
+                cyclesOnlyOn ? "border-[#d35d6e]/60 bg-[#d35d6e]/15 text-[#d35d6e]" : "border-border-medium text-text-muted hover:text-text-primary"
+              }`}
+            >
+              {cyclesOnlyOn ? "show all" : "cycles only"}
+            </button>
+          </div>
+          {cyclesData.cycles.length === 0 ? (
+            <div className="text-[10px] text-text-muted">No import cycles detected. 🎉</div>
+          ) : (
+            <div className="flex flex-col gap-1.5 max-h-56 overflow-y-auto">
+              {cyclesData.cycles.slice(0, 10).map((cyc, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => focusEntity(cyc[0], { view: "structural" })}
+                  className="text-[10px] text-left text-text-secondary hover:text-text-primary leading-snug font-mono break-all"
+                  title="Focus the first node in this cycle"
+                >
+                  {cyc.map((id) => nodeNameById.get(id) ?? id).join(" → ")}
+                </button>
+              ))}
+              {cyclesData.cycles.length > 10 && (
+                <div className="text-[9px] text-text-muted">+{cyclesData.cycles.length - 10} more</div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {/* 300-series items 92-94: error-propagation banner (active root) */}
       {errorPropRootNode && (
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3 rounded-lg border border-[#d35d6e]/40 bg-surface/95 px-4 py-2 shadow-xl backdrop-blur-sm">
@@ -2003,6 +2200,8 @@ function GraphViewInner() {
           </span>
         </div>
       )}
+      {/* 300-series item 48: churn × complexity hotspot quadrant panel */}
+      <HotspotQuadrant />
     </div>
   );
 }

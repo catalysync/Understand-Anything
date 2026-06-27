@@ -316,6 +316,15 @@ function DashboardContent({
   const toggleInstrumentationHeat = useDashboardStore((s) => s.toggleInstrumentationHeat);
   const swallowedMarkers = useDashboardStore((s) => s.swallowedMarkers);
   const toggleSwallowedMarkers = useDashboardStore((s) => s.toggleSwallowedMarkers);
+  // 300-series items 27/48/51/108: git-metadata overlays.
+  const ownershipOverlay = useDashboardStore((s) => s.ownershipOverlay);
+  const setOwnershipOverlay = useDashboardStore((s) => s.setOwnershipOverlay);
+  const cyclesOverlay = useDashboardStore((s) => s.cyclesOverlay);
+  const toggleCyclesOverlay = useDashboardStore((s) => s.toggleCyclesOverlay);
+  const resilienceBadges = useDashboardStore((s) => s.resilienceBadges);
+  const toggleResilienceBadges = useDashboardStore((s) => s.toggleResilienceBadges);
+  const hotspotPanelOpen = useDashboardStore((s) => s.hotspotPanelOpen);
+  const toggleHotspotPanel = useDashboardStore((s) => s.toggleHotspotPanel);
   const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(readSidebarWidth);
   const resizingRef = useRef(false);
@@ -849,6 +858,62 @@ function DashboardContent({
                   }`}
                 >
                   ⚠ Swallowed
+                </button>
+                {/* 300-series item 51: ownership / bus-factor overlay (cycles off→owner→single-owner) */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setOwnershipOverlay(
+                      ownershipOverlay === "off" ? "owner" : ownershipOverlay === "owner" ? "single-owner" : "off",
+                    )
+                  }
+                  title="Ownership overlay — cycle: off → color by owner → flag single-owner complex hotspots"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    ownershipOverlay !== "off"
+                      ? "border-[#7da7d4]/50 bg-[#7da7d4]/10 text-[#7da7d4]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  👤 {ownershipOverlay === "single-owner" ? "Bus factor" : "Owners"}
+                </button>
+                {/* 300-series item 27: circular-dependency overlay */}
+                <button
+                  type="button"
+                  onClick={toggleCyclesOverlay}
+                  title="Circular-dependency detector — highlight import-cycle nodes/edges in red"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    cyclesOverlay
+                      ? "border-[#d35d6e]/50 bg-[#d35d6e]/10 text-[#d35d6e]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  ⟲ Cycles
+                </button>
+                {/* 300-series item 108: resilience badges on calls edges */}
+                <button
+                  type="button"
+                  onClick={toggleResilienceBadges}
+                  title="Resilience badges — stamp ↻ retry / ⊘ breaker / ⏱ timeout glyphs on guarded calls edges"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    resilienceBadges
+                      ? "border-[#5a9e6f]/50 bg-[#5a9e6f]/10 text-[#5a9e6f]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  ↻ Resilience
+                </button>
+                {/* 300-series item 48: churn × complexity hotspot quadrant panel */}
+                <button
+                  type="button"
+                  onClick={toggleHotspotPanel}
+                  title="Churn × complexity hotspot quadrant — refactor-priority scatter"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    hotspotPanelOpen
+                      ? "border-[#c97070]/50 bg-[#c97070]/10 text-[#c97070]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  ▦ Hotspots
                 </button>
               </>
             )}

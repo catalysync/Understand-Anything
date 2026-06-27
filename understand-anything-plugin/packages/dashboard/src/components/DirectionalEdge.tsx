@@ -23,6 +23,10 @@ import {
 export interface DirectionalEdgeData extends Record<string, unknown> {
   description?: string;
   edgeLabel?: string;
+  /** 300-series item 108: resilience glyphs to stamp on the edge (↻/⊘/⏱/…). */
+  resilienceGlyphs?: string;
+  /** 300-series item 108: human label for the resilience tooltip. */
+  resilienceLabel?: string;
 }
 
 export type DirectionalFlowEdge = Edge<DirectionalEdgeData, "directional">;
@@ -52,6 +56,8 @@ function DirectionalEdgeComponent({
 
   const description = data?.description;
   const edgeLabel = data?.edgeLabel;
+  const resilienceGlyphs = data?.resilienceGlyphs;
+  const resilienceLabel = data?.resilienceLabel;
 
   return (
     <>
@@ -66,6 +72,23 @@ function DirectionalEdgeComponent({
         onMouseLeave={() => setHover(false)}
       />
       <BaseEdge id={id} path={edgePath} markerEnd={markerEnd} markerStart={markerStart} style={style} />
+      {/* 300-series item 108: resilience glyph chip stamped at the edge midpoint. */}
+      {resilienceGlyphs && (
+        <EdgeLabelRenderer>
+          <div
+            style={{
+              position: "absolute",
+              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+              pointerEvents: "none",
+              zIndex: 2,
+            }}
+            className="rounded-full border border-[#5a9e6f]/50 bg-surface/90 px-1.5 py-0.5 text-[11px] leading-none text-[#5a9e6f] shadow"
+            title={resilienceLabel}
+          >
+            {resilienceGlyphs}
+          </div>
+        </EdgeLabelRenderer>
+      )}
       {(hover || edgeLabel) && (
         <EdgeLabelRenderer>
           <div
