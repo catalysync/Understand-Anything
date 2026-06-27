@@ -240,20 +240,64 @@ function DomainNodeDetails({ node, graph }: { node: GraphNode; graph: KnowledgeG
 
   if (node.type === "step") {
     if (!node.filePath) return null;
-    return (
-      <div className="space-y-3">
-        <div>
-          <h4 className="text-[10px] uppercase tracking-wider text-text-muted mb-1">{t.nodeInfo.implementation}</h4>
-          <div className="text-[11px] font-mono text-text-secondary">
-            {node.filePath}
-            {node.lineRange && <span className="text-text-muted">:{node.lineRange[0]}-{node.lineRange[1]}</span>}
-          </div>
-        </div>
-      </div>
-    );
+    return <DomainStepDetails node={node} />;
   }
 
   return null;
+}
+
+/**
+ * Features 110/105/106: a domain step's implementation panel — resolves the
+ * step's filePath to a structural node, exposing "Open file" and
+ * "Trace this code". Badges a step whose file is missing from the structural
+ * graph (and notes when only a filePath, not a lineRange, is known).
+ */
+function DomainStepDetails({ node }: { node: GraphNode }) {
+  const { t } = useI18n();
+  const filePathToNodeId = useDashboardStore((s) => s.filePathToNodeId);
+  const openStepFile = useDashboardStore((s) => s.openStepFile);
+  const traceStepCode = useDashboardStore((s) => s.traceStepCode);
+
+  const fp = node.filePath!;
+  const resolved = filePathToNodeId.has(fp);
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wider text-text-muted mb-1">{t.nodeInfo.implementation}</h4>
+        <div className="text-[11px] font-mono text-text-secondary break-all">
+          {fp}
+          {node.lineRange ? (
+            <span className="text-text-muted">:{node.lineRange[0]}-{node.lineRange[1]}</span>
+          ) : (
+            <span className="ml-1 text-[9px] uppercase tracking-wider text-text-muted/70">(file-level)</span>
+          )}
+        </div>
+      </div>
+      {resolved ? (
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => openStepFile(node.id)}
+            className="flex-1 px-2 py-1.5 rounded bg-elevated hover:bg-accent/10 text-[11px] text-text-secondary hover:text-accent transition-colors"
+          >
+            {"{} "}Open file
+          </button>
+          <button
+            type="button"
+            onClick={() => traceStepCode(node.id)}
+            className="flex-1 px-2 py-1.5 rounded bg-elevated hover:bg-accent/10 text-[11px] text-text-secondary hover:text-accent transition-colors"
+          >
+            ▶ Trace this code
+          </button>
+        </div>
+      ) : (
+        <div className="px-2 py-1.5 rounded bg-[#c97070]/10 border border-[#c97070]/30 text-[10px] text-[#c97070]">
+          ⚠ File not found in the structural graph — cannot open or trace.
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function NodeInfo() {

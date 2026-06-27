@@ -9,6 +9,8 @@ export interface StepNodeData extends Record<string, unknown> {
   filePath?: string;
   stepId: string;
   order: number;
+  /** Feature 93: dimmed when another flow is focused. */
+  dimmed?: boolean;
 }
 
 export type StepFlowNode = Node<StepNodeData, "step-node">;
@@ -17,7 +19,14 @@ function StepNode({ data }: NodeProps<StepFlowNode>) {
   const selectNode = useDashboardStore((s) => s.selectNode);
   const openContextMenu = useDashboardStore((s) => s.openContextMenu);
   const selectedNodeId = useDashboardStore((s) => s.selectedNodeId);
+  const filePathToNodeId = useDashboardStore((s) => s.filePathToNodeId);
+  const openStepFile = useDashboardStore((s) => s.openStepFile);
+  const traceStepCode = useDashboardStore((s) => s.traceStepCode);
   const isSelected = selectedNodeId === data.stepId;
+
+  // Feature 110/105: is the step's file present in the structural graph?
+  const fileResolved = !!(data.filePath && filePathToNodeId.has(data.filePath));
+  const fileMissing = !!data.filePath && !fileResolved;
 
   return (
     <div
@@ -25,7 +34,7 @@ function StepNode({ data }: NodeProps<StepFlowNode>) {
         isSelected
           ? "border-accent bg-accent/10"
           : "border-border-subtle bg-elevated hover:border-accent/40"
-      }`}
+      } ${data.dimmed ? "opacity-25" : ""}`}
       onClick={() => selectNode(data.stepId)}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -47,8 +56,47 @@ function StepNode({ data }: NodeProps<StepFlowNode>) {
         {data.summary}
       </div>
       {data.filePath && (
-        <div className="text-[9px] font-mono text-text-muted mt-1 truncate">
-          {data.filePath}
+        <div className="flex items-center gap-1 mt-1.5">
+          {fileResolved ? (
+            <button
+              type="button"
+              title="Open source file"
+              onClick={(e) => {
+                e.stopPropagation();
+                openStepFile(data.stepId);
+              }}
+              className="flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.5 rounded bg-surface border border-border-subtle text-text-muted hover:text-accent hover:border-accent/50 transition-colors max-w-[140px]"
+            >
+              <span className="shrink-0">{"{}"}</span>
+              <span className="truncate">{data.filePath}</span>
+            </button>
+          ) : (
+            <span
+              title="File not found in structural graph"
+              className="flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#c97070]/10 border border-[#c97070]/30 text-[#c97070] max-w-[150px]"
+            >
+              <span className="shrink-0">⚠</span>
+              <span className="truncate">{data.filePath}</span>
+            </span>
+          )}
+          {fileResolved && (
+            <button
+              type="button"
+              title="Trace this code"
+              onClick={(e) => {
+                e.stopPropagation();
+                traceStepCode(data.stepId);
+              }}
+              className="text-[9px] px-1.5 py-0.5 rounded bg-surface border border-border-subtle text-text-muted hover:text-accent hover:border-accent/50 transition-colors shrink-0"
+            >
+              ▶ trace
+            </button>
+          )}
+          {fileMissing && (
+            <span className="text-[8px] uppercase tracking-wider text-[#c97070]/70">
+              missing
+            </span>
+          )}
         </div>
       )}
     </div>

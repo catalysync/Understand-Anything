@@ -2,6 +2,7 @@ import { memo } from "react";
 import { Handle, Position } from "@xyflow/react";
 import type { Node, NodeProps } from "@xyflow/react";
 import { useDashboardStore } from "../store";
+import { flowsForDomain } from "../utils/domainHelpers";
 
 export interface DomainClusterData extends Record<string, unknown> {
   label: string;
@@ -19,7 +20,18 @@ function DomainClusterNode({ data }: NodeProps<DomainClusterFlowNode>) {
   const selectedNodeId = useDashboardStore((s) => s.selectedNodeId);
   const selectNode = useDashboardStore((s) => s.selectNode);
   const openContextMenu = useDashboardStore((s) => s.openContextMenu);
+  const domainGraph = useDashboardStore((s) => s.domainGraph);
+  const expandedDomainFlows = useDashboardStore((s) => s.expandedDomainFlows);
+  const toggleDomainFlowsExpanded = useDashboardStore(
+    (s) => s.toggleDomainFlowsExpanded,
+  );
+  const setFocusedFlow = useDashboardStore((s) => s.setFocusedFlow);
   const isSelected = selectedNodeId === data.domainId;
+  const isExpanded = expandedDomainFlows.has(data.domainId);
+
+  // Feature 91: accordion the domain's flows inline (no full-screen swap).
+  const flows =
+    isExpanded && domainGraph ? flowsForDomain(domainGraph, data.domainId) : [];
 
   return (
     <div
@@ -61,9 +73,62 @@ function DomainClusterNode({ data }: NodeProps<DomainClusterFlowNode>) {
         </div>
       )}
 
-      <div className="text-[10px] text-text-muted">
-        {data.flowCount} flow{data.flowCount !== 1 ? "s" : ""}
+      <div className="flex items-center justify-between">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleDomainFlowsExpanded(data.domainId);
+          }}
+          className="text-[10px] text-text-muted hover:text-accent transition-colors flex items-center gap-1"
+        >
+          <span className="inline-block w-2.5 text-center">
+            {isExpanded ? "▾" : "▸"}
+          </span>
+          {data.flowCount} flow{data.flowCount !== 1 ? "s" : ""}
+        </button>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            navigateToDomain(data.domainId);
+          }}
+          className="text-[9px] text-text-muted hover:text-accent transition-colors"
+        >
+          open →
+        </button>
       </div>
+
+      {/* Feature 91: inline flow accordion */}
+      {isExpanded && flows.length > 0 && (
+        <div className="mt-2 pt-2 border-t border-border-subtle space-y-1 max-h-[220px] overflow-auto">
+          {flows.map(({ flow, steps }) => (
+            <button
+              key={flow.id}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                navigateToDomain(data.domainId);
+                selectNode(flow.id);
+                setFocusedFlow(flow.id);
+              }}
+              className="block w-full text-left px-2 py-1.5 rounded bg-elevated hover:bg-accent/10 transition-colors group"
+            >
+              <div className="text-[11px] font-medium text-text-primary group-hover:text-accent truncate">
+                {flow.name}
+              </div>
+              <div className="text-[9px] text-text-muted">
+                {steps.length} step{steps.length !== 1 ? "s" : ""}
+                {flow.domainMeta?.entryPoint ? (
+                  <span className="ml-1 font-mono text-accent/60 truncate">
+                    {String(flow.domainMeta.entryPoint)}
+                  </span>
+                ) : null}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -115,6 +115,7 @@ function buildGraphIndexes(graph: KnowledgeGraph): {
   nodesById: Map<string, GraphNode>;
   nodeIdToLayerId: Map<string, string>;
   nodeIdToLayerIds: Map<string, Set<string>>;
+  filePathToNodeId: Map<string, string>;
 } {
   const nodesById = new Map<string, GraphNode>();
   for (const node of graph.nodes) nodesById.set(node.id, node);
@@ -131,7 +132,19 @@ function buildGraphIndexes(graph: KnowledgeGraph): {
       set.add(layer.id);
     }
   }
-  return { nodesById, nodeIdToLayerId, nodeIdToLayerIds };
+  // Domain features 110/105/123: map a source filePath → the structural node id
+  // that owns it (prefer `file` nodes; fall back to first node with that path).
+  // Mirrors nodeIdToLayerId: first-matching-wins, with `file` nodes preferred.
+  const filePathToNodeId = new Map<string, string>();
+  for (const node of graph.nodes) {
+    if (!node.filePath) continue;
+    const existing = filePathToNodeId.get(node.filePath);
+    if (!existing || node.type === "file") {
+      // file node wins; otherwise keep first.
+      if (!existing || node.type === "file") filePathToNodeId.set(node.filePath, node.id);
+    }
+  }
+  return { nodesById, nodeIdToLayerId, nodeIdToLayerIds, filePathToNodeId };
 }
 
 /** Maximum number of entries in the sidebar navigation history. */
@@ -217,6 +230,8 @@ interface DashboardStore {
   nodeIdToLayerId: Map<string, string>;
   /** id → set of every layer the node belongs to, rebuilt by setGraph. Empty before any graph loads. */
   nodeIdToLayerIds: Map<string, Set<string>>;
+  /** Domain features 110/105/123: source filePath → structural node id (file-node preferred). */
+  filePathToNodeId: Map<string, string>;
   selectedNodeId: string | null;
   searchQuery: string;
   searchResults: SearchResult[];
@@ -329,6 +344,23 @@ interface DashboardStore {
   isKnowledgeGraph: boolean;
   domainGraph: KnowledgeGraph | null;
   activeDomainId: string | null;
+
+  // ---- Domain business-flow UI state (features 91/93/99/113) -------------
+  /** Feature 91: domain ids whose flows are expanded inline (accordion). */
+  expandedDomainFlows: Set<string>;
+  toggleDomainFlowsExpanded: (domainId: string) => void;
+  /** Feature 93: focus-a-flow mode — isolate one flow + its steps; null = off. */
+  focusedFlowId: string | null;
+  setFocusedFlow: (flowId: string | null) => void;
+  /** Feature 99: storyline mode — linearize the longest cross_domain chain. */
+  domainStorylineMode: boolean;
+  toggleDomainStoryline: () => void;
+  /** Feature 113: domain search query (domains/flows/steps/entities by name/summary). */
+  domainSearchQuery: string;
+  setDomainSearchQuery: (q: string) => void;
+  /** Feature 110/106: jump from a domain step to its source / a trace. */
+  openStepFile: (stepNodeId: string) => void;
+  traceStepCode: (stepNodeId: string) => void;
 
   // Flow / Trace view: walk a call chain starting from a root node.
   // traceRoot is the originally-selected node; traceStack is the breadcrumb
@@ -551,6 +583,7 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   nodesById: new Map<string, GraphNode>(),
   nodeIdToLayerId: new Map<string, string>(),
   nodeIdToLayerIds: new Map<string, Set<string>>(),
+  filePathToNodeId: new Map<string, string>(),
   selectedNodeId: null,
   searchQuery: "",
   searchResults: [],
@@ -722,12 +755,14 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     const { viewMode, domainGraph, activeDomainId } = get();
     // Preserve domain view if a domain graph is already loaded
     const keepDomainView = viewMode === "domain" && domainGraph !== null;
-    const { nodesById, nodeIdToLayerId, nodeIdToLayerIds } = buildGraphIndexes(graph);
+    const { nodesById, nodeIdToLayerId, nodeIdToLayerIds, filePathToNodeId } =
+      buildGraphIndexes(graph);
     set({
       graph,
       nodesById,
       nodeIdToLayerId,
       nodeIdToLayerIds,
+      filePathToNodeId,
       searchEngine,
       searchResults,
       navigationLevel: "overview",
@@ -1334,6 +1369,8 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       activeDomainId: domainId,
       focusNodeId: null,
       nodeHistory: newHistory,
+      // Entering a domain resets per-domain detail UI (focus-a-flow / accordion).
+      focusedFlowId: null,
     });
   },
 
@@ -1342,7 +1379,50 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       activeDomainId: null,
       selectedNodeId: null,
       focusNodeId: null,
+      focusedFlowId: null,
     });
+  },
+
+  // ---- Domain business-flow actions (91/93/99/113/110/106) --------------
+  expandedDomainFlows: new Set<string>(),
+  toggleDomainFlowsExpanded: (domainId) =>
+    set((s) => {
+      const next = new Set(s.expandedDomainFlows);
+      if (next.has(domainId)) next.delete(domainId);
+      else next.add(domainId);
+      return { expandedDomainFlows: next };
+    }),
+  focusedFlowId: null,
+  setFocusedFlow: (flowId) => set({ focusedFlowId: flowId }),
+  domainStorylineMode: false,
+  toggleDomainStoryline: () =>
+    set((s) => ({ domainStorylineMode: !s.domainStorylineMode })),
+  domainSearchQuery: "",
+  setDomainSearchQuery: (q) => set({ domainSearchQuery: q }),
+
+  /** Feature 110/105: focus the structural file node behind a domain step. */
+  openStepFile: (stepNodeId) => {
+    const { domainGraph, filePathToNodeId } = get();
+    const step = domainGraph?.nodes.find((n) => n.id === stepNodeId);
+    const fp = step?.filePath;
+    if (!fp) return;
+    const structuralId = filePathToNodeId.get(fp);
+    if (!structuralId) return;
+    // Bridge: jump into the structural graph on that file, then open its source.
+    get().focusEntity(structuralId, { view: "structural" });
+    get().openCodeViewer(structuralId);
+  },
+
+  /** Feature 106: "Trace this code" — re-root the trace at the step's file. */
+  traceStepCode: (stepNodeId) => {
+    const { domainGraph, filePathToNodeId } = get();
+    const step = domainGraph?.nodes.find((n) => n.id === stepNodeId);
+    const fp = step?.filePath;
+    if (!fp) return;
+    const structuralId = filePathToNodeId.get(fp);
+    if (!structuralId) return;
+    get().startTraceAt(structuralId);
+    get().setViewMode("trace");
   },
 
   expandedContainers: new Set<string>(),
