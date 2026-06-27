@@ -208,83 +208,260 @@ function resolveSafeFile(
   return { ok: true, absoluteFile, safeRelativePath };
 }
 
-async function explainLines(
-  body: { path?: unknown; start?: unknown; end?: unknown },
-): Promise<{ statusCode: number; payload: unknown }> {
-  const requestedPath = typeof body.path === "string" ? body.path : "";
-  const start = Math.max(1, Math.floor(Number(body.start) || 1));
-  const end = Math.max(start, Math.floor(Number(body.end) || start));
+// ---------------------------------------------------------------------------
+// Wave-4: mode-aware /explain.json. One endpoint serves explain | followup |
+// quiz | walkthrough | subtree | ghost | confidence. Rules + context + level
+// are prepended to the prompt; an affordance JSON tail is appended so the
+// client can parse suggested questions / citations / confidence out of the text.
+// ---------------------------------------------------------------------------
 
-  const resolved = resolveSafeFile(requestedPath);
-  if (!resolved.ok) {
-    return { statusCode: resolved.statusCode, payload: resolved.payload };
+type ExplainMode =
+  | "explain"
+  | "followup"
+  | "quiz"
+  | "walkthrough"
+  | "subtree"
+  | "ghost"
+  | "confidence";
+
+const VALID_MODES = new Set<ExplainMode>([
+  "explain",
+  "followup",
+  "quiz",
+  "walkthrough",
+  "subtree",
+  "ghost",
+  "confidence",
+]);
+
+/** Persona preamble keyed by the requested answer-detail level. */
+function levelPreamble(level: unknown): string {
+  if (level === "expert") {
+    return "The reader is an EXPERIENCED engineer (but may be new to Go). Be precise and dense; skip basics, focus on design intent, edge cases, and idioms. ";
   }
-
-  const cacheKey = `${resolved.safeRelativePath}:${start}:${end}`;
-  const cached = explainCache.get(cacheKey);
-  if (cached) {
-    return {
-      statusCode: 200,
-      payload: { explanation: cached.explanation, session_id: cached.sessionId, cached: true },
-    };
+  if (level === "intermediate") {
+    return "The reader is a working developer who is NEW TO GO. Assume general programming fluency; teach the Go-specific concept(s) but don't over-explain basics. ";
   }
+  return "The reader is NEW TO GO and to this codebase. Be beginner-friendly and concrete; teach the relevant Go concept(s) (goroutines, interfaces, error wrapping, context, defer, channels, struct embedding — only those present). ";
+}
 
-  let content: string;
+/** The fenced-JSON affordance tail every answer should append. */
+const AFFORDANCE_TAIL =
+  "\n\nAfter your human-readable answer, append EXACTLY ONE fenced ```json code block " +
+  "(and nothing after it) shaped like:\n" +
+  '```json\n{"suggested_questions":["short q1","short q2","short q3"],' +
+  '"citations":[{"file":"relative/path.go","line":42}],' +
+  '"confidence":0.0,"clarifying_question":""}\n```\n' +
+  "Rules for that block: suggested_questions = 3 short natural follow-ups a reader would ask next. " +
+  "citations = the file:line locations your answer leans on (use the file paths shown above). " +
+  "confidence = your 0-1 confidence that you fully answered without guessing. " +
+  "clarifying_question = a single question to ask the reader ONLY if confidence < 0.5, else an empty string.";
+
+/** Prepend persisted rules + @-mention context + go-docs steer to a prompt. */
+function decoratePrompt(
+  base: string,
+  opts: { rules?: unknown; context?: unknown; level?: unknown; goDocs?: unknown },
+): string {
+  const parts: string[] = [];
+  parts.push(levelPreamble(opts.level));
+  if (typeof opts.rules === "string" && opts.rules.trim()) {
+    parts.push(
+      "PROJECT GUIDANCE (always honor): " + opts.rules.trim().slice(0, 2000) + "\n",
+    );
+  }
+  if (opts.goDocs) {
+    parts.push(
+      "Ground your answer in the Go standard library and language spec for any stdlib symbols involved; name the package/function precisely. ",
+    );
+  }
+  let prompt = parts.join("") + "\n" + base;
+  if (typeof opts.context === "string" && opts.context.trim()) {
+    prompt +=
+      "\n\nADDITIONAL CONTEXT the reader has pinned (reference it if relevant):\n" +
+      opts.context.trim().slice(0, 12000);
+  }
+  return prompt;
+}
+
+/** Read a safe source snippet (with a little surrounding context). */
+function readSnippet(
+  safeRelativePath: string,
+  absoluteFile: string,
+  start: number,
+  end: number,
+): { snippet: string; lang: string } | null {
   try {
-    const stat = fs.statSync(resolved.absoluteFile);
-    if (!stat.isFile()) return { statusCode: 400, payload: { error: "Path is not a file" } };
-    if (stat.size > MAX_SOURCE_FILE_BYTES) {
-      return { statusCode: 413, payload: { error: "File is too large" } };
-    }
-    content = fs.readFileSync(resolved.absoluteFile, "utf8");
+    const stat = fs.statSync(absoluteFile);
+    if (!stat.isFile() || stat.size > MAX_SOURCE_FILE_BYTES) return null;
+    const content = fs.readFileSync(absoluteFile, "utf8");
+    const lines = content.split(/\r\n|\n|\r/);
+    const ctxStart = Math.max(1, start - 6);
+    const ctxEnd = Math.min(lines.length, end + 6);
+    return {
+      snippet: lines.slice(ctxStart - 1, ctxEnd).join("\n"),
+      lang: detectLanguage(safeRelativePath),
+    };
   } catch {
-    return { statusCode: 404, payload: { error: "File not found" } };
+    return null;
   }
-
-  const lines = content.split(/\r\n|\n|\r/);
-  const ctxStart = Math.max(1, start - 6);
-  const ctxEnd = Math.min(lines.length, end + 6);
-  const snippet = lines.slice(ctxStart - 1, ctxEnd).join("\n");
-  const lang = detectLanguage(resolved.safeRelativePath);
-
-  const prompt =
-    "You are helping a developer who is NEW TO GO understand this code. " +
-    "Explain what these specific lines do, and briefly teach the relevant Go concept(s) they rely on " +
-    "(goroutines, interfaces, error wrapping, context, defer, channels, struct embedding, etc. — only the ones present). " +
-    "4-7 sentences, concrete, beginner-friendly, reference the code. " +
-    "Use markdown (bold for key terms, `inline code` for identifiers). " +
-    "Remember this code so you can answer follow-up questions about it.\n\n" +
-    `File: ${resolved.safeRelativePath} lines ${start}-${end}\n` +
-    "```" + lang + "\n" + snippet + "\n```";
-
-  const out = await runClaude(prompt);
-  if (!out.ok) return { statusCode: 500, payload: { error: out.error } };
-  explainCache.set(cacheKey, { explanation: out.result, sessionId: out.sessionId });
-  return { statusCode: 200, payload: { explanation: out.result, session_id: out.sessionId } };
 }
 
 /**
- * Follow-up Q&A: resume the grounded session from the original explanation so
- * the answer stays anchored to that exact code. Still beginner/Go-teaching.
+ * Unified explain entrypoint. Dispatches on `mode`. For follow-ups (and quiz
+ * grading / clarify replies / simpler-deeper) a sessionId + question resume the
+ * grounded session. Ghost mode is a cheap one-liner and is cached.
  */
-async function followUp(
-  body: { sessionId?: unknown; question?: unknown },
+async function handleExplainRequest(
+  body: Record<string, unknown>,
 ): Promise<{ statusCode: number; payload: unknown }> {
-  const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
-  const question = typeof body.question === "string" ? body.question.trim() : "";
-  if (!sessionId) return { statusCode: 400, payload: { error: "Missing sessionId" } };
-  if (!question) return { statusCode: 400, payload: { error: "Missing question" } };
-  if (question.length > 2000) return { statusCode: 400, payload: { error: "Question too long" } };
+  const mode: ExplainMode = VALID_MODES.has(body.mode as ExplainMode)
+    ? (body.mode as ExplainMode)
+    : typeof body.sessionId === "string" && typeof body.question === "string"
+    ? "followup"
+    : "explain";
 
-  const prompt =
-    "Continuing to teach the same developer who is NEW TO GO about the code you just explained. " +
-    "Answer their follow-up question, staying grounded in that exact code, beginner-friendly, " +
-    "using markdown (bold key terms, `inline code` for identifiers). Be concise.\n\n" +
-    `Follow-up question: ${question}`;
+  const decor = {
+    rules: body.rules,
+    context: body.context,
+    level: body.level,
+    goDocs: body.goDocs,
+  };
 
-  const out = await runClaude(prompt, sessionId);
+  // ----- Session-resuming modes (followup / quiz-grade / clarify reply) -----
+  if (mode === "followup") {
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+    const question = typeof body.question === "string" ? body.question.trim() : "";
+    if (!sessionId) return { statusCode: 400, payload: { error: "Missing sessionId" } };
+    if (!question) return { statusCode: 400, payload: { error: "Missing question" } };
+    if (question.length > 4000) return { statusCode: 400, payload: { error: "Question too long" } };
+    const base =
+      "Continuing about the code/trace you have been discussing. Answer the reader's follow-up, " +
+      "staying grounded in that exact code, using markdown (bold key terms, `inline code` for identifiers). Be concise.\n\n" +
+      `Follow-up: ${question}`;
+    const prompt = decoratePrompt(base, decor) + AFFORDANCE_TAIL;
+    const out = await runClaude(prompt, sessionId);
+    if (!out.ok) return { statusCode: 500, payload: { error: out.error } };
+    return { statusCode: 200, payload: { result: out.result, session_id: out.sessionId } };
+  }
+
+  // ----- Quiz me (Socratic) — fresh or resumed -----
+  if (mode === "quiz") {
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+    // A grading turn carries the user's answer in `question`.
+    if (sessionId && typeof body.question === "string") {
+      const answer = body.question.trim().slice(0, 4000);
+      const base =
+        "The reader just answered your quiz question with:\n\n" +
+        `"${answer}"\n\n` +
+        "Grade it warmly: say what's right, gently correct what's off, and give the ideal answer. " +
+        "Use markdown. Then optionally ask one harder follow-up question.";
+      const prompt = decoratePrompt(base, decor) + AFFORDANCE_TAIL;
+      const out = await runClaude(prompt, sessionId);
+      if (!out.ok) return { statusCode: 500, payload: { error: out.error } };
+      return { statusCode: 200, payload: { result: out.result, session_id: out.sessionId } };
+    }
+    // Otherwise: pose a fresh question about the supplied hop.
+    const requestedPath = typeof body.path === "string" ? body.path : "";
+    const resolved = resolveSafeFile(requestedPath);
+    if (!resolved.ok) return { statusCode: resolved.statusCode, payload: resolved.payload };
+    const start = Math.max(1, Math.floor(Number(body.start) || 1));
+    const end = Math.max(start, Math.floor(Number(body.end) || start));
+    const snip = readSnippet(resolved.safeRelativePath, resolved.absoluteFile, start, end);
+    if (!snip) return { statusCode: 404, payload: { error: "File not found" } };
+    const base =
+      "Ask the reader ONE focused Socratic question about the Go / architecture of this code " +
+      "to check their understanding (e.g. why an interface, what a goroutine guards, how an error propagates). " +
+      "Pose only the question (1-2 sentences) — do NOT answer it; you'll grade their reply next.\n\n" +
+      `File: ${resolved.safeRelativePath} lines ${start}-${end}\n` +
+      "```" + snip.lang + "\n" + snip.snippet + "\n```";
+    const prompt = decoratePrompt(base, decor) + AFFORDANCE_TAIL;
+    const out = await runClaude(prompt);
+    if (!out.ok) return { statusCode: 500, payload: { error: out.error } };
+    return { statusCode: 200, payload: { explanation: out.result, session_id: out.sessionId } };
+  }
+
+  // ----- Subtree / walkthrough — reason over supplied `context`, no single file -----
+  if (mode === "subtree" || mode === "walkthrough") {
+    const context = typeof body.context === "string" ? body.context : "";
+    if (!context.trim()) return { statusCode: 400, payload: { error: "Missing context" } };
+    const base =
+      mode === "subtree"
+        ? "Reason across this whole sub-flow of the call tree. Explain what the sub-flow accomplishes end-to-end, " +
+          "how the hops connect (who calls whom and why), and the key Go concept(s) at play. Use markdown."
+        : "Walk the reader through this trace beginner-first, as an ordered narrative. For each step give a short " +
+          "heading and 1-2 sentences of what happens and why, in call order. Use a numbered markdown list. " +
+          "Keep it skimmable.";
+    const prompt = decoratePrompt(base, decor) + AFFORDANCE_TAIL;
+    const out = await runClaude(prompt);
+    if (!out.ok) return { statusCode: 500, payload: { error: out.error } };
+    return { statusCode: 200, payload: { explanation: out.result, session_id: out.sessionId } };
+  }
+
+  // ----- Ghost — cheap one-sentence explanation, cached -----
+  if (mode === "ghost") {
+    const requestedPath = typeof body.path === "string" ? body.path : "";
+    const resolved = resolveSafeFile(requestedPath);
+    if (!resolved.ok) return { statusCode: resolved.statusCode, payload: resolved.payload };
+    const start = Math.max(1, Math.floor(Number(body.start) || 1));
+    const end = Math.max(start, Math.floor(Number(body.end) || start));
+    const cacheKey = `ghost:${resolved.safeRelativePath}:${start}:${end}`;
+    const cached = explainCache.get(cacheKey);
+    if (cached) {
+      return { statusCode: 200, payload: { explanation: cached.explanation, session_id: null, cached: true } };
+    }
+    const snip = readSnippet(resolved.safeRelativePath, resolved.absoluteFile, start, end);
+    if (!snip) return { statusCode: 404, payload: { error: "File not found" } };
+    const prompt =
+      "In ONE plain sentence (no markdown, no preamble), say what this code does. Be specific.\n\n" +
+      "```" + snip.lang + "\n" + snip.snippet + "\n```";
+    const out = await runClaude(prompt);
+    if (!out.ok) return { statusCode: 500, payload: { error: out.error } };
+    const oneLine = out.result.split(/\r?\n/).find((l) => l.trim())?.trim() ?? out.result.trim();
+    explainCache.set(cacheKey, { explanation: oneLine, sessionId: null });
+    return { statusCode: 200, payload: { explanation: oneLine, session_id: null } };
+  }
+
+  // ----- Default: line explanation (explain / confidence) -----
+  const requestedPath = typeof body.path === "string" ? body.path : "";
+  const start = Math.max(1, Math.floor(Number(body.start) || 1));
+  const end = Math.max(start, Math.floor(Number(body.end) || start));
+  const resolved = resolveSafeFile(requestedPath);
+  if (!resolved.ok) return { statusCode: resolved.statusCode, payload: resolved.payload };
+
+  // Cache only the plain explain mode without per-request decoration so the
+  // affordance tail stays consistent; decorated requests skip the cache.
+  const decorated = Boolean(
+    (typeof body.rules === "string" && body.rules.trim()) ||
+      (typeof body.context === "string" && body.context.trim()) ||
+      body.goDocs ||
+      (body.level && body.level !== "beginner"),
+  );
+  const cacheKey = `${resolved.safeRelativePath}:${start}:${end}`;
+  if (!decorated) {
+    const cached = explainCache.get(cacheKey);
+    if (cached) {
+      return {
+        statusCode: 200,
+        payload: { explanation: cached.explanation, session_id: cached.sessionId, cached: true },
+      };
+    }
+  }
+
+  const snip = readSnippet(resolved.safeRelativePath, resolved.absoluteFile, start, end);
+  if (!snip) return { statusCode: 404, payload: { error: "File not found" } };
+
+  const base =
+    "Explain what these specific lines do, and briefly teach the relevant Go concept(s) they rely on. " +
+    "4-7 sentences, concrete, reference the code. Use markdown (bold key terms, `inline code` for identifiers). " +
+    "Remember this code so you can answer follow-up questions about it.\n\n" +
+    `File: ${resolved.safeRelativePath} lines ${start}-${end}\n` +
+    "```" + snip.lang + "\n" + snip.snippet + "\n```";
+  const prompt = decoratePrompt(base, decor) + AFFORDANCE_TAIL;
+
+  const out = await runClaude(prompt);
   if (!out.ok) return { statusCode: 500, payload: { error: out.error } };
-  return { statusCode: 200, payload: { result: out.result, session_id: out.sessionId } };
+  if (!decorated) explainCache.set(cacheKey, { explanation: out.result, sessionId: out.sessionId });
+  return { statusCode: 200, payload: { explanation: out.result, session_id: out.sessionId } };
 }
 
 function readSourceFile(url: URL) {
@@ -364,6 +541,10 @@ const EMPTY_WORKSPACE = {
   sessions: {} as Record<string, string>,
   watches: [] as string[],
   tours: [] as unknown[],
+  // Wave-4: persisted free-text trace rules + (reserved) snapshots. Wave 3
+  // found unknown keys are silently dropped, so these must be whitelisted.
+  rules: "",
+  snapshots: [] as unknown[],
 };
 
 /** Resolve the workspace.json path next to the knowledge graph (or null). */
@@ -414,6 +595,9 @@ function writeWorkspace(body: Record<string, unknown>): { statusCode: number; pa
       body.sessions && typeof body.sessions === "object" ? body.sessions : {},
     watches: Array.isArray(body.watches) ? body.watches : [],
     tours: stampCreatedAt(body.tours ?? []),
+    // Wave-4 whitelist: persist trace rules + snapshots.
+    rules: typeof body.rules === "string" ? body.rules : "",
+    snapshots: stampCreatedAt(body.snapshots ?? []),
   };
 
   try {
@@ -529,13 +713,9 @@ export default defineConfig({
                 sendJson(res, 403, { error: "Forbidden: missing or invalid token" });
                 return;
               }
-              // Follow-up Q&A when a sessionId + question are present;
-              // otherwise it's an initial line explanation.
-              const task =
-                typeof body.sessionId === "string" && typeof body.question === "string"
-                  ? followUp(body)
-                  : explainLines(body);
-              task
+              // Mode-aware dispatch (explain | followup | quiz | walkthrough |
+              // subtree | ghost | confidence). Defaults inferred inside.
+              handleExplainRequest(body)
                 .then((result) => sendJson(res, result.statusCode, result.payload))
                 .catch((e: unknown) =>
                   sendJson(res, 500, {
@@ -550,6 +730,7 @@ export default defineConfig({
                 path: url.searchParams.get("path"),
                 start: url.searchParams.get("start"),
                 end: url.searchParams.get("end"),
+                mode: url.searchParams.get("mode"),
               });
               return;
             }
@@ -557,7 +738,8 @@ export default defineConfig({
             let raw = "";
             req.on("data", (chunk) => {
               raw += chunk;
-              if (raw.length > 16384) req.destroy();
+              // Wave-4: subtree/walkthrough/@-mention context can be large.
+              if (raw.length > 256 * 1024) req.destroy();
             });
             req.on("end", () => {
               try {

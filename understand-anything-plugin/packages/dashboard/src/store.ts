@@ -10,6 +10,20 @@ import type {
 import type { ReactFlowInstance } from "@xyflow/react";
 
 export type Persona = "non-technical" | "junior" | "experienced";
+/** Wave-4 feature 37b: answer-detail level for claude -p explanations. */
+export type TraceLevel = "beginner" | "intermediate" | "expert";
+/** Wave-4 feature 39: an @-mention context chip (a hop or file) Claude can see. */
+export interface ContextChip {
+  id: string;
+  /** Human label shown on the chip, e.g. `executeDeploy` or `deploy.go`. */
+  label: string;
+  /** Relative file path used to fetch the source the model sees. */
+  filePath: string;
+  /** 1-based inclusive line range; null = whole file (header only). */
+  lineRange: [number, number] | null;
+  /** The exact source text the model will see (fetched when the chip is added). */
+  source?: string;
+}
 export type NavigationLevel = "overview" | "layer-detail";
 export type NodeType = "file" | "function" | "class" | "module" | "concept" | "config" | "document" | "service" | "table" | "endpoint" | "pipeline" | "schema" | "resource" | "domain" | "flow" | "step" | "article" | "entity" | "topic" | "claim" | "source";
 export type Complexity = "simple" | "moderate" | "complex";
@@ -129,6 +143,9 @@ export interface Workspace {
   sessions: Record<string, string>;
   watches: string[];
   tours: SavedTour[];
+  /** Wave-4 feature 38: free-text "trace rules" sent as guidance on every
+   *  claude -p call. Now whitelisted server-side so it persists. */
+  rules: string;
 }
 
 export const EMPTY_WORKSPACE: Workspace = {
@@ -138,6 +155,7 @@ export const EMPTY_WORKSPACE: Workspace = {
   sessions: {},
   watches: [],
   tours: [],
+  rules: "",
 };
 
 function genId(prefix: string): string {
@@ -349,6 +367,21 @@ interface DashboardStore {
   removeWatch: (symbol: string) => void;
   saveTour: (name: string, hopIds: string[]) => void;
   removeTour: (id: string) => void;
+
+  // ---- Wave-4: converse-with-Claude state -------------------------------
+  /** Feature 38: persisted free-text trace rules (workspace.rules). */
+  setRules: (rules: string) => void;
+  /** Feature 37b: answer-detail persona for claude -p (beginner/intermediate/expert). */
+  traceLevel: TraceLevel;
+  setTraceLevel: (level: TraceLevel) => void;
+  /** Feature 40: ground answers in Go stdlib/spec. */
+  goDocs: boolean;
+  toggleGoDocs: () => void;
+  /** Feature 39: @-mention context chips (hops/files added as extra context). */
+  contextChips: ContextChip[];
+  addContextChip: (chip: ContextChip) => void;
+  removeContextChip: (id: string) => void;
+  clearContextChips: () => void;
 
   setDomainGraph: (graph: KnowledgeGraph) => void;
   setViewMode: (mode: ViewMode) => void;
@@ -1033,6 +1066,32 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       schedulePersist(workspace);
       return { workspace };
     }),
+
+  // ---- Wave-4: converse-with-Claude state -------------------------------
+  setRules: (rules) =>
+    set((state) => {
+      if (state.workspace.rules === rules) return {};
+      const workspace = { ...state.workspace, rules };
+      schedulePersist(workspace);
+      return { workspace };
+    }),
+
+  traceLevel: "beginner",
+  setTraceLevel: (traceLevel) => set({ traceLevel }),
+
+  goDocs: false,
+  toggleGoDocs: () => set((s) => ({ goDocs: !s.goDocs })),
+
+  contextChips: [],
+  addContextChip: (chip) =>
+    set((s) =>
+      s.contextChips.some((c) => c.id === chip.id)
+        ? {}
+        : { contextChips: [...s.contextChips, chip] },
+    ),
+  removeContextChip: (id) =>
+    set((s) => ({ contextChips: s.contextChips.filter((c) => c.id !== id) })),
+  clearContextChips: () => set({ contextChips: [] }),
 
   setDomainGraph: (graph) => {
     set({ domainGraph: graph });

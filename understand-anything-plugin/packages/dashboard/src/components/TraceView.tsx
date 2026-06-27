@@ -1,7 +1,10 @@
+import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDashboardStore } from "../store";
+import type { ContextChip, TraceLevel } from "../store";
 import CodeBlock from "./CodeBlock";
-import { useExplain } from "./useCodeAssist";
+import { useExplain, fetchGhost, resolveCitation } from "./useCodeAssist";
+import type { ExplainState } from "./useCodeAssist";
 import ExplainPanel from "./ExplainPanel";
 import TraceControls from "./TraceControls";
 import {
@@ -459,6 +462,8 @@ function HopCard({
   predicateMatch,
   diffStatus,
   scrollToLine,
+  onCitation,
+  buildSubtreeContext,
 }: {
   node: GraphNode;
   index: number;
@@ -480,6 +485,10 @@ function HopCard({
   predicateMatch: boolean | null;
   diffStatus: DiffStatus | null;
   scrollToLine: number | null;
+  /** Feature 34: jump to a cited file:line (resolved to a node in the trace). */
+  onCitation: (file: string, line: number) => void;
+  /** Feature 35: gather this hop's subtree as `context` text for mode:subtree. */
+  buildSubtreeContext: (rootId: string) => string;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [showCallers, setShowCallers] = useState(false);
@@ -513,8 +522,24 @@ function HopCard({
     () => (peekId ? graph.nodes.find((n) => n.id === peekId) ?? null : null),
     [peekId, graph.nodes],
   );
-  const { state: goNote, explain: explainGo, askFollowUp: askGo, reset: resetGo } =
+  const { state: goNote, explain: explainGo, runMode: runGoMode, askFollowUp: askGo, reset: resetGo } =
     useExplain(accessToken, node.id);
+  // Wave-4 conversational decoration sent on every claude -p call.
+  const rules = useDashboardStore((s) => s.workspace.rules);
+  const traceLevel = useDashboardStore((s) => s.traceLevel);
+  const setTraceLevel = useDashboardStore((s) => s.setTraceLevel);
+  const goDocs = useDashboardStore((s) => s.goDocs);
+  const contextChips = useDashboardStore((s) => s.contextChips);
+  const explainOpts = useMemo(() => {
+    const context = contextChips
+      .filter((c) => c.source)
+      .map(
+        (c) =>
+          `--- @${c.label} (${c.filePath}${c.lineRange ? `:${c.lineRange[0]}-${c.lineRange[1]}` : ""}) ---\n${c.source}`,
+      )
+      .join("\n\n");
+    return { rules, level: traceLevel, goDocs, context: context || undefined };
+  }, [rules, traceLevel, goDocs, contextChips]);
   const toggleBookmark = useDashboardStore((s) => s.toggleBookmark);
   const allBookmarks = useDashboardStore((s) => s.workspace.bookmarks);
   const allAnnotations = useDashboardStore((s) => s.workspace.annotations);
@@ -586,7 +611,50 @@ function HopCard({
 
   const teachGo = () => {
     if (!node.filePath || !node.lineRange) return;
-    explainGo(node.filePath, node.lineRange[0], node.lineRange[1], node.lineRange[0]);
+    explainGo(node.filePath, node.lineRange[0], node.lineRange[1], node.lineRange[0], explainOpts);
+  };
+
+  // Feature 36: pose a Socratic quiz question about this hop (same session).
+  const quizMe = () => {
+    if (!node.filePath || !node.lineRange) return;
+    runGoMode(
+      "quiz",
+      { path: node.filePath, start: node.lineRange[0], end: node.lineRange[1], ...explainOpts },
+      node.lineRange[0],
+    );
+  };
+
+  // Feature 35: explain this hop's whole subtree in one mode:subtree call.
+  // The sub-flow text is the primary context; any @-mention chip source is
+  // appended (so explainOpts.context must NOT clobber it).
+  const explainSubtree = () => {
+    const subtree = buildSubtreeContext(node.id);
+    const context = explainOpts.context ? `${subtree}\n\n${explainOpts.context}` : subtree;
+    runGoMode("subtree", { ...explainOpts, context }, node.lineRange?.[0] ?? 1);
+  };
+
+  // Follow-ups from this hop carry the same decoration (rules/level/goDocs).
+  const askGoDecorated = (q: string) => askGo(q, explainOpts);
+
+  // Feature 41: debounced, cached ghost (one-sentence) explanation on hover.
+  const [ghost, setGhost] = useState<string | null>(null);
+  const [ghostLoading, setGhostLoading] = useState(false);
+  const ghostTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ghostFetched = useRef(false);
+  const onHoverEnter = () => {
+    if (!node.filePath || !node.lineRange || goNote.status !== "idle") return;
+    if (ghostFetched.current) return;
+    ghostTimer.current = setTimeout(() => {
+      ghostFetched.current = true;
+      setGhostLoading(true);
+      void fetchGhost(accessToken, node.filePath!, node.lineRange![0], node.lineRange![1]).then((s) => {
+        setGhostLoading(false);
+        if (s) setGhost(s);
+      });
+    }, 600);
+  };
+  const onHoverLeave = () => {
+    if (ghostTimer.current) clearTimeout(ghostTimer.current);
   };
 
   const totalCallees = bundles.reduce((acc, b) => acc + b.nodes.length, 0);
@@ -642,9 +710,30 @@ function HopCard({
           >
             {node.type}
           </span>
-          <div className="min-w-0 flex-1">
+          <div
+            className="min-w-0 flex-1"
+            onMouseEnter={onHoverEnter}
+            onMouseLeave={onHoverLeave}
+          >
             <div className="text-sm font-heading text-text-primary truncate flex items-center gap-1.5" title={node.name}>
-              {node.name}
+              <button
+                type="button"
+                data-testid="hop-name"
+                onClick={teachGo}
+                className="truncate text-left hover:text-accent transition-colors"
+                title="Click to open the full Go explanation session"
+              >
+                {node.name}
+              </button>
+              {(ghost || ghostLoading) && goNote.status === "idle" && (
+                <span
+                  data-testid="ghost-tip"
+                  className="text-[10px] font-normal italic text-text-muted truncate max-w-[24rem]"
+                  title={ghost ?? "…"}
+                >
+                  {ghostLoading && !ghost ? "…" : `— ${ghost}`}
+                </span>
+              )}
               {isCritical && (
                 <span className="text-[9px] text-accent" title="On the critical path">◆</span>
               )}
@@ -1022,20 +1111,54 @@ function HopCard({
             </div>
           )}
 
-          {/* Go note — excluded for muted hops */}
+          {/* Go note — excluded for muted hops. Wave-4: + quiz / subtree. */}
           {!muted && node.filePath && node.lineRange && (
             <div className="mt-1.5">
               {goNote.status === "idle" ? (
-                <button
-                  type="button"
-                  onClick={teachGo}
-                  className="text-[10px] font-semibold text-accent hover:text-accent-bright transition-colors"
-                  title="Get a beginner Go explanation for this hop"
-                >
-                  ✦ Teach me the Go here
-                </button>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={teachGo}
+                    className="text-[10px] font-semibold text-accent hover:text-accent-bright transition-colors"
+                    title="Get a Go explanation for this hop"
+                  >
+                    ✦ Teach me the Go here
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="quiz-me"
+                    onClick={quizMe}
+                    className="text-[10px] font-semibold text-gold hover:text-gold-bright transition-colors"
+                    title="Quiz me on this hop (Socratic)"
+                  >
+                    ❓ Quiz me
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="explain-subtree"
+                    onClick={explainSubtree}
+                    className="text-[10px] font-semibold text-text-muted hover:text-accent transition-colors"
+                    title="Explain this hop's whole subtree as one sub-flow"
+                  >
+                    ⌥ Explain subtree
+                  </button>
+                </div>
               ) : (
-                <ExplainPanel state={goNote} title="✦ Go note" onClose={resetGo} onAsk={askGo} />
+                <ExplainPanel
+                  state={goNote}
+                  title={
+                    goNote.mode === "quiz"
+                      ? "❓ Quiz"
+                      : goNote.mode === "subtree"
+                        ? "⌥ Subtree"
+                        : "✦ Go note"
+                  }
+                  onClose={resetGo}
+                  onAsk={askGoDecorated}
+                  onCitation={onCitation}
+                  level={traceLevel}
+                  onLevel={setTraceLevel}
+                />
               )}
             </div>
           )}
@@ -1533,6 +1656,165 @@ function DebugBar({
   );
 }
 
+/**
+ * Wave-4 converse-with-Claude controls: trace rules editor (feature 38),
+ * answer-level toggle (37b), @go-docs toggle (40), @-mention chips (39), and
+ * walk-me-through (42). Compact, collapsible, sits above the trace.
+ */
+function ConverseBar({
+  rules,
+  onRules,
+  level,
+  onLevel,
+  goDocs,
+  onToggleGoDocs,
+  chips,
+  onRemoveChip,
+  onAddHopAsChip,
+  onWalkThrough,
+  walkState,
+  walkPanel,
+}: {
+  rules: string;
+  onRules: (r: string) => void;
+  level: TraceLevel;
+  onLevel: (l: TraceLevel) => void;
+  goDocs: boolean;
+  onToggleGoDocs: () => void;
+  chips: ContextChip[];
+  onRemoveChip: (id: string) => void;
+  onAddHopAsChip: () => void;
+  onWalkThrough: () => void;
+  walkState: ExplainState["status"];
+  walkPanel: React.ReactNode;
+}) {
+  const [rulesOpen, setRulesOpen] = useState(false);
+  return (
+    <div
+      data-testid="converse-bar"
+      className="rounded border border-border-subtle/60 bg-surface/40 px-2.5 py-2 space-y-2"
+    >
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[9px] uppercase tracking-wider text-text-muted">Claude</span>
+
+        {/* Walk-me-through */}
+        <button
+          type="button"
+          data-testid="walk-through"
+          onClick={onWalkThrough}
+          disabled={walkState === "loading"}
+          className="text-[10px] font-semibold px-2 py-0.5 rounded border border-accent/40 text-accent hover:text-accent-bright hover:border-accent/70 transition-colors disabled:opacity-50"
+          title="Narrate this whole trace, beginner-first"
+        >
+          🚶 Walk me through
+        </button>
+
+        {/* Level toggle */}
+        <div className="flex items-center gap-0.5 rounded border border-border-subtle p-0.5">
+          {(["beginner", "intermediate", "expert"] as TraceLevel[]).map((lv) => (
+            <button
+              key={lv}
+              type="button"
+              data-testid={`bar-level-${lv}`}
+              onClick={() => onLevel(lv)}
+              className={`text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded transition-colors ${
+                level === lv ? "bg-accent/15 text-accent" : "text-text-muted hover:text-text-primary"
+              }`}
+              title={`Answer at ${lv} level`}
+            >
+              {lv}
+            </button>
+          ))}
+        </div>
+
+        {/* @go-docs toggle */}
+        <button
+          type="button"
+          data-testid="go-docs-toggle"
+          onClick={onToggleGoDocs}
+          className={`text-[10px] font-semibold px-2 py-0.5 rounded border transition-colors ${
+            goDocs
+              ? "border-gold/60 text-gold bg-gold/10"
+              : "border-border-subtle text-text-muted hover:text-text-primary"
+          }`}
+          title="Ground answers in Go stdlib/spec"
+        >
+          @go-docs {goDocs ? "on" : "off"}
+        </button>
+
+        {/* Rules editor toggle */}
+        <button
+          type="button"
+          data-testid="rules-toggle"
+          onClick={() => setRulesOpen((o) => !o)}
+          className={`text-[10px] font-semibold px-2 py-0.5 rounded border transition-colors ${
+            rules.trim()
+              ? "border-accent/50 text-accent"
+              : "border-border-subtle text-text-muted hover:text-text-primary"
+          }`}
+          title="Trace rules (project guidance sent on every call)"
+        >
+          ⚙ Rules{rules.trim() ? " ●" : ""}
+        </button>
+
+        {/* @-mention: add current hop as a context chip */}
+        <button
+          type="button"
+          data-testid="add-mention"
+          onClick={onAddHopAsChip}
+          className="text-[10px] font-semibold px-2 py-0.5 rounded border border-border-subtle text-text-muted hover:text-accent hover:border-accent/50 transition-colors"
+          title="Add the focused hop as @-mention context Claude can see"
+        >
+          @ mention focus
+        </button>
+      </div>
+
+      {/* Rules editor */}
+      {rulesOpen && (
+        <textarea
+          data-testid="rules-input"
+          value={rules}
+          onChange={(e) => onRules(e.target.value)}
+          rows={2}
+          placeholder="Trace rules: e.g. 'user is new to Go; always name the package'…"
+          className="w-full bg-surface text-text-primary text-[11.5px] rounded-md px-2.5 py-1.5 border border-border-subtle focus:outline-none focus:border-accent/50 placeholder-text-muted resize-y"
+        />
+      )}
+
+      {/* @-mention chips (feature 39) */}
+      {chips.length > 0 && (
+        <div className="flex flex-wrap gap-1.5" data-testid="mention-chips">
+          {chips.map((c) => (
+            <span
+              key={c.id}
+              className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded border border-accent/40 text-accent bg-accent/5"
+              title={
+                c.source
+                  ? `Claude sees:\n${c.source.slice(0, 400)}${c.source.length > 400 ? "…" : ""}`
+                  : `${c.filePath}${c.lineRange ? `:${c.lineRange[0]}-${c.lineRange[1]}` : ""} (loading source…)`
+              }
+            >
+              @{c.label}
+              {!c.source && <span className="opacity-60">…</span>}
+              <button
+                type="button"
+                onClick={() => onRemoveChip(c.id)}
+                className="hover:text-accent-bright"
+                title="Remove"
+              >
+                ✕
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Walk-through panel */}
+      {walkState !== "idle" && <div className="pt-1">{walkPanel}</div>}
+    </div>
+  );
+}
+
 export default function TraceView({ accessToken }: TraceViewProps) {
   const graph = useDashboardStore((s) => s.graph);
   const traceRoot = useDashboardStore((s) => s.traceRoot);
@@ -1648,6 +1930,27 @@ export default function TraceView({ accessToken }: TraceViewProps) {
     return diffTraceIds(currentIds, snap.ids);
   }, [snapshots, diffBaseline, currentIds]);
 
+  // Wave-4: conversational decoration + state shared across the trace.
+  const rules = useDashboardStore((s) => s.workspace.rules);
+  const setRules = useDashboardStore((s) => s.setRules);
+  const traceLevel = useDashboardStore((s) => s.traceLevel);
+  const setTraceLevel = useDashboardStore((s) => s.setTraceLevel);
+  const goDocs = useDashboardStore((s) => s.goDocs);
+  const toggleGoDocs = useDashboardStore((s) => s.toggleGoDocs);
+  const contextChips = useDashboardStore((s) => s.contextChips);
+  const addContextChip = useDashboardStore((s) => s.addContextChip);
+  const removeContextChip = useDashboardStore((s) => s.removeContextChip);
+  const explainOpts = useMemo(() => {
+    const context = contextChips
+      .filter((c) => c.source)
+      .map(
+        (c) =>
+          `--- @${c.label} (${c.filePath}${c.lineRange ? `:${c.lineRange[0]}-${c.lineRange[1]}` : ""}) ---\n${c.source}`,
+      )
+      .join("\n\n");
+    return { rules, level: traceLevel, goDocs, context: context || undefined };
+  }, [rules, traceLevel, goDocs, contextChips]);
+
   // Feature 27: explain-the-error-path via claude -p (reuse the existing hook).
   const { state: errExplain, explain: runErrExplain, askFollowUp: askErr, reset: resetErr } =
     useExplain(accessToken);
@@ -1655,9 +1958,53 @@ export default function TraceView({ accessToken }: TraceViewProps) {
     const errHops = hops.filter((h) => errorPathIds.has(h.id));
     const target = errHops.find((h) => h.filePath && h.lineRange) ?? errHops[0];
     if (target?.filePath && target.lineRange) {
-      runErrExplain(target.filePath, target.lineRange[0], target.lineRange[1], target.lineRange[0]);
+      runErrExplain(target.filePath, target.lineRange[0], target.lineRange[1], target.lineRange[0], explainOpts);
     }
   };
+
+  // Feature 42: "Walk me through this trace" — one narrated walkthrough session.
+  const { state: walk, runMode: runWalk, askFollowUp: askWalk, reset: resetWalk } =
+    useExplain(accessToken);
+  const walkThrough = () => {
+    const lines = hops.map((h, i) => {
+      const loc = lineLabel(h);
+      const summary = h.summary?.trim() ? h.summary.trim() : "(no summary)";
+      return `${i + 1}. ${h.name}  [${loc}]\n   ${summary}`;
+    });
+    const base = `Trace from ${focusNode.name} (${lineLabel(focusNode)}):\n\n${lines.join("\n")}`;
+    const context = explainOpts.context ? `${base}\n\n${explainOpts.context}` : base;
+    runWalk("walkthrough", { ...explainOpts, context });
+  };
+
+  // Feature 35: gather a hop's subtree (this node + descendants in the current
+  // direction) into a context blob (name/file/lineRange/summary per hop).
+  const buildSubtreeContext = (rootId: string): string => {
+    const sub = buildTrace(graph, rootId, Math.max(depth, 3), direction);
+    const lines = sub.map((h, i) => {
+      const loc = lineLabel(h);
+      const summary = h.summary?.trim() ? h.summary.trim() : "(no summary)";
+      return `${i + 1}. ${h.name}  [${loc}]\n   ${summary}`;
+    });
+    const rootNode = nodesById.get(rootId);
+    return `Sub-flow rooted at ${rootNode?.name ?? rootId} (${direction}):\n\n${lines.join("\n")}`;
+  };
+
+  // Feature 34: jump to a citation (file:line) → resolve to a node in the
+  // current trace and scroll/flash it; otherwise just select it in the graph.
+  const onCitation = (file: string, line: number) => {
+    const targetId = resolveCitation(graph, file, line);
+    if (!targetId) return;
+    const idx = hops.findIndex((h) => h.id === targetId);
+    if (idx >= 0) {
+      setJumpRequest({ index: idx, line, nonce: Date.now() });
+      const el = hopRefs.current.get(idx);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    } else {
+      // Not in the visible trace — re-root the trace there.
+      setTraceRoot(targetId);
+    }
+  };
+
 
   // Feature 21: jump to the next hop that touches any watched symbol, cycling
   // through occurrences on repeated clicks. (Aggregate watchHits signal — exact
@@ -1822,6 +2169,8 @@ export default function TraceView({ accessToken }: TraceViewProps) {
         predicateMatch={predicateMatch}
         diffStatus={diffStatus}
         scrollToLine={scrollToLine}
+        onCitation={onCitation}
+        buildSubtreeContext={buildSubtreeContext}
       />
     );
   };
@@ -1902,7 +2251,10 @@ export default function TraceView({ accessToken }: TraceViewProps) {
                 state={errExplain}
                 title="✦ Error path"
                 onClose={resetErr}
-                onAsk={askErr}
+                onAsk={(q) => askErr(q, explainOpts)}
+                onCitation={onCitation}
+                level={traceLevel}
+                onLevel={setTraceLevel}
               />
             }
           />
@@ -1919,6 +2271,58 @@ export default function TraceView({ accessToken }: TraceViewProps) {
             />
           </div>
         )}
+
+        {/* Wave-4: converse-with-Claude controls (rules / level / go-docs /
+            @-mention chips / walk-me-through). */}
+        <div className="mb-2">
+          <ConverseBar
+            rules={rules}
+            onRules={setRules}
+            level={traceLevel}
+            onLevel={setTraceLevel}
+            goDocs={goDocs}
+            onToggleGoDocs={toggleGoDocs}
+            chips={contextChips}
+            onRemoveChip={removeContextChip}
+            onAddHopAsChip={() => {
+              if (!focusNode.filePath) return;
+              const chip = {
+                id: `chip-${focusNode.id}`,
+                label: focusNode.name,
+                filePath: focusNode.filePath,
+                lineRange: focusNode.lineRange ?? null,
+              };
+              addContextChip(chip);
+              // Fetch the exact source the model will see (best-effort).
+              if (accessToken !== "__demo__" && focusNode.filePath) {
+                void fetch(`/file-content.json?token=${encodeURIComponent(accessToken)}&path=${encodeURIComponent(focusNode.filePath)}`)
+                  .then((r) => r.json())
+                  .then((d: { content?: string }) => {
+                    if (typeof d.content !== "string") return;
+                    const lines = d.content.split(/\r\n|\n|\r/);
+                    const src = focusNode.lineRange
+                      ? lines.slice(focusNode.lineRange[0] - 1, focusNode.lineRange[1]).join("\n")
+                      : lines.slice(0, 80).join("\n");
+                    addContextChip({ ...chip, source: src });
+                  })
+                  .catch(() => {});
+              }
+            }}
+            onWalkThrough={walkThrough}
+            walkState={walk.status}
+            walkPanel={
+              <ExplainPanel
+                state={walk}
+                title="🚶 Walk-through"
+                onClose={resetWalk}
+                onAsk={(q) => askWalk(q, explainOpts)}
+                onCitation={onCitation}
+                level={traceLevel}
+                onLevel={setTraceLevel}
+              />
+            }
+          />
+        </div>
 
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="min-w-0">
