@@ -39,9 +39,15 @@ import {
   PORTAL_NODE_WIDTH,
   PORTAL_NODE_HEIGHT,
   ELK_DEFAULT_LAYOUT_OPTIONS,
+  elkLayoutOptionsForDirection,
   nodesToElkInput,
   mergeElkPositions,
+  applyForceLayout,
 } from "../utils/layout";
+import { COMPLEXITY_RANK } from "../store";
+import type { Complexity } from "../store";
+import DirectionalEdge from "./DirectionalEdge";
+import { MarkerType, useViewport } from "@xyflow/react";
 import { applyElkLayout } from "../utils/elk-layout";
 import type { ElkChild, ElkEdge, ElkInput } from "../utils/elk-layout";
 import {
@@ -59,6 +65,10 @@ const nodeTypes = {
   "layer-cluster": LayerClusterNode,
   portal: PortalNode,
   container: ContainerNode,
+};
+
+const edgeTypes = {
+  directional: DirectionalEdge,
 };
 
 import type { NodeCategory } from "../store";
@@ -206,6 +216,42 @@ function SelectedNodeFitView() {
   return null;
 }
 
+/**
+ * Item 55: level-of-detail controller. Reads the live viewport zoom and,
+ * when the zoom crosses a bucket boundary, stamps a `lod` field
+ * ("dot" / "name" / "full") onto every custom node via React Flow's node
+ * setter. Doing this here (rather than in the node-building memo) means a
+ * zoom gesture only triggers a cheap field-patch on nodes whose bucket
+ * actually changed — the expensive structural memos don't re-run.
+ */
+function zoomToLod(zoom: number): "dot" | "name" | "full" {
+  if (zoom < 0.35) return "dot";
+  if (zoom < 0.7) return "name";
+  return "full";
+}
+
+function LODController() {
+  const { zoom } = useViewport();
+  const { setNodes } = useReactFlow();
+  const lod = zoomToLod(zoom);
+  const prevLodRef = useRef<string>("");
+
+  useEffect(() => {
+    if (prevLodRef.current === lod) return;
+    prevLodRef.current = lod;
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (n.type !== "custom") return n;
+        const data = n.data as CustomFlowNode["data"];
+        if (data.lod === lod) return n;
+        return { ...n, data: { ...data, lod } };
+      }),
+    );
+  }, [lod, setNodes]);
+
+  return null;
+}
+
 // ── Overview level: layers as cluster nodes ────────────────────────────
 
 function useOverviewGraph() {
@@ -340,6 +386,8 @@ interface LayerDetailTopology {
   containers: DerivedContainer[];
   nodeToContainer: Map<string, string>;
   intraContainer: GraphEdge[];
+  /** Item 48: how many leaf nodes the declutter toggle hid this build. */
+  declutteredCount: number;
 }
 
 const EMPTY_TOPOLOGY: LayerDetailTopology = {
@@ -352,6 +400,7 @@ const EMPTY_TOPOLOGY: LayerDetailTopology = {
   containers: [],
   nodeToContainer: new Map(),
   intraContainer: [],
+  declutteredCount: 0,
 };
 
 /**
@@ -378,6 +427,12 @@ function useLayerDetailTopology(): LayerDetailTopology & {
   const drillIntoLayer = useDashboardStore((s) => s.drillIntoLayer);
   const detailLevel = useDashboardStore((s) => s.detailLevel);
   const showFunctionsInClassView = useDashboardStore((s) => s.showFunctionsInClassView);
+  // Structural-view options (items 47/48/70/71).
+  const structuralDirection = useDashboardStore((s) => s.structuralDirection);
+  const structuralLayout = useDashboardStore((s) => s.structuralLayout);
+  const declutterLeaves = useDashboardStore((s) => s.declutterLeaves);
+  const complexityRange = useDashboardStore((s) => s.complexityRange);
+  const tagFilter = useDashboardStore((s) => s.tagFilter);
 
   const handleNodeSelect = useCallback(
     (nodeId: string) => {
@@ -450,6 +505,47 @@ function useLayerDetailTopology(): LayerDetailTopology & {
       const effectiveCategory = category ?? "code";
       return nodeTypeFilters[effectiveCategory] !== false;
     });
+
+    // Item 71: complexity-range window. Always keep nodes that lack a
+    // complexity (e.g. some non-code types) so the slider never blanks them.
+    if (complexityRange[0] > 0 || complexityRange[1] < 2) {
+      filteredGraphNodes = filteredGraphNodes.filter((n) => {
+        const rank = COMPLEXITY_RANK[n.complexity as Complexity];
+        if (rank === undefined) return true;
+        return rank >= complexityRange[0] && rank <= complexityRange[1];
+      });
+    }
+
+    // Item 70: tag facet (AND-of-nothing / OR-of-selected — a node passes if
+    // it carries at least one selected tag). Empty set = no constraint.
+    if (tagFilter.size > 0) {
+      filteredGraphNodes = filteredGraphNodes.filter((n) =>
+        (n.tags ?? []).some((tg) => tagFilter.has(tg)),
+      );
+    }
+
+    // Item 48: declutter — drop low-degree leaf nodes (degree ≤ 1 within the
+    // surviving edge set). Computed against edges over the currently-visible
+    // node set so it composes with the filters above. The hidden count is
+    // surfaced as a banner by GraphViewInner.
+    let declutteredCount = 0;
+    if (declutterLeaves) {
+      const visibleSet = new Set(filteredGraphNodes.map((n) => n.id));
+      const degree = new Map<string, number>();
+      for (const e of graph.edges) {
+        if (!visibleSet.has(e.source) || !visibleSet.has(e.target)) continue;
+        if (e.source === e.target) continue;
+        degree.set(e.source, (degree.get(e.source) ?? 0) + 1);
+        degree.set(e.target, (degree.get(e.target) ?? 0) + 1);
+      }
+      const before = filteredGraphNodes.length;
+      filteredGraphNodes = filteredGraphNodes.filter((n) => {
+        // Never hide the focused node — keeping it stable avoids a blank view.
+        if (n.id === focusNodeId) return true;
+        return (degree.get(n.id) ?? 0) > 1;
+      });
+      declutteredCount = before - filteredGraphNodes.length;
+    }
 
     let filteredNodeIds = new Set(filteredGraphNodes.map((n) => n.id));
 
@@ -636,6 +732,7 @@ function useLayerDetailTopology(): LayerDetailTopology & {
       aggEdges,
       portalNodes,
       portalEdges,
+      declutteredCount,
     };
   }, [
     graph,
@@ -650,6 +747,9 @@ function useLayerDetailTopology(): LayerDetailTopology & {
     drillIntoLayer,
     detailLevel,
     showFunctionsInClassView,
+    complexityRange,
+    tagFilter,
+    declutterLeaves,
     handleNodeSelect,
     handleContainerToggle,
   ]);
@@ -681,6 +781,7 @@ function useLayerDetailTopology(): LayerDetailTopology & {
       aggEdges,
       portalNodes,
       portalEdges,
+      declutteredCount,
     } = built;
 
     // Build Stage 1 ELK input: containers as opaque atoms + ungrouped files
@@ -727,9 +828,50 @@ function useLayerDetailTopology(): LayerDetailTopology & {
       })),
     ];
 
+    const allBaseNodes: Node[] = [
+      ...(containerFlowNodes as unknown as Node[]),
+      ...(ungroupedFlowNodes as unknown as Node[]),
+      ...(portalNodes as unknown as Node[]),
+    ];
+
+    const commit = (positionedNodes: Node[]) => {
+      setTopology({
+        nodes: positionedNodes,
+        edges: aggEdges,
+        portalNodes,
+        portalEdges,
+        filteredEdges: filteredGraphEdges,
+        filteredNodes: filteredGraphNodes,
+        containers,
+        nodeToContainer,
+        intraContainer,
+        declutteredCount,
+      });
+      setLayoutStatus("ready");
+    };
+
+    // Item 46: force-directed layout path. d3-force is synchronous and works
+    // on the Stage 1 atom set (containers + ungrouped + portals); container
+    // children still lazy-expand via Stage 2 with their own ELK pass.
+    if (structuralLayout === "force") {
+      const dims = new Map<string, { width: number; height: number }>();
+      for (const c of stage1Children) dims.set(c.id, { width: c.width, height: c.height });
+      const forceEdges: Edge[] = stage1Edges.map((e) => ({
+        id: e.id,
+        source: e.sources[0],
+        target: e.targets[0],
+      }));
+      const { nodes: positionedNodes } = applyForceLayout(allBaseNodes, forceEdges, dims);
+      if (!cancelled) commit(positionedNodes);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    // Item 47: direction-aware ELK layered layout (DOWN vs RIGHT).
     const elkInput: ElkInput = {
       id: "layer",
-      layoutOptions: ELK_DEFAULT_LAYOUT_OPTIONS,
+      layoutOptions: elkLayoutOptionsForDirection(structuralDirection),
       children: stage1Children,
       edges: stage1Edges,
     };
@@ -742,24 +884,8 @@ function useLayerDetailTopology(): LayerDetailTopology & {
           // Funnel into store so WarningBanner surfaces them.
           useDashboardStore.getState().appendLayoutIssues(issues);
         }
-        const allBaseNodes: Node[] = [
-          ...(containerFlowNodes as unknown as Node[]),
-          ...(ungroupedFlowNodes as unknown as Node[]),
-          ...(portalNodes as unknown as Node[]),
-        ];
         const positionedNodes = mergeElkPositions(allBaseNodes, positioned);
-        setTopology({
-          nodes: positionedNodes,
-          edges: aggEdges,
-          portalNodes,
-          portalEdges,
-          filteredEdges: filteredGraphEdges,
-          filteredNodes: filteredGraphNodes,
-          containers,
-          nodeToContainer,
-          intraContainer,
-        });
-        setLayoutStatus("ready");
+        commit(positionedNodes);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -770,7 +896,7 @@ function useLayerDetailTopology(): LayerDetailTopology & {
     return () => {
       cancelled = true;
     };
-  }, [built, stage1Tick]);
+  }, [built, stage1Tick, structuralLayout, structuralDirection]);
 
   // ── Stage 2: lazy per-container layout on expand ───────────────────────
   // Watches expandedContainers and computes ELK on each newly-expanded
@@ -944,6 +1070,35 @@ function buildCustomFlowNode(
 }
 
 /**
+ * Items 61 + 62: build a React Flow edge from a real GraphEdge so it renders
+ * with directional arrow heads (by `direction`), weight-scaled thickness
+ * (by `weight`), and a hover tooltip (from `description`).
+ */
+function buildDirectionalEdge(
+  id: string,
+  source: string,
+  target: string,
+  edge: GraphEdge,
+): Edge {
+  const weight = typeof edge.weight === "number" ? edge.weight : 0.5;
+  // 1.2px (weak) → ~4px (strong) — keeps thin edges visible while letting
+  // heavy dependencies read as bolder.
+  const strokeWidth = 1.2 + Math.max(0, Math.min(1, weight)) * 2.8;
+  const dir = edge.direction ?? "forward";
+  const marker = { type: MarkerType.ArrowClosed, color: "#a39787", width: 16, height: 16 };
+  return {
+    id,
+    source,
+    target,
+    type: "directional",
+    markerEnd: dir === "forward" || dir === "bidirectional" ? marker : undefined,
+    markerStart: dir === "backward" || dir === "bidirectional" ? marker : undefined,
+    style: { stroke: "rgba(212,165,116,0.55)", strokeWidth },
+    data: { description: edge.description, edgeLabel: edge.type },
+  };
+}
+
+/**
  * Visual overlay: cheap O(n) pass that applies selection, search, and tour
  * state onto already-positioned nodes. Avoids triggering ELK relayout.
  *
@@ -968,6 +1123,8 @@ function useLayerDetailGraph() {
   const affectedNodeIds = useDashboardStore((s) => s.affectedNodeIds);
   const focusNodeId = useDashboardStore((s) => s.focusNodeId);
   const selectNode = useDashboardStore((s) => s.selectNode);
+  // Item 83: complexity heat overlay flag, applied per-node below.
+  const complexityHeat = useDashboardStore((s) => s.complexityHeat);
 
   const handleNodeSelect = useCallback(
     (nodeId: string) => selectNode(nodeId),
@@ -1162,12 +1319,13 @@ function useLayerDetailGraph() {
         data.isSelected === isSelected &&
         data.isTourHighlighted === isTourHighlighted &&
         data.isNeighbor === isNeighbor &&
-        data.isSelectionFaded === isSelectionFaded
+        data.isSelectionFaded === isSelectionFaded &&
+        data.heat === complexityHeat
       ) {
         return node;
       }
 
-      return { ...node, data: { ...data, isHighlighted, searchScore, isSelected, isTourHighlighted, isNeighbor, isSelectionFaded } };
+      return { ...node, data: { ...data, isHighlighted, searchScore, isSelected, isTourHighlighted, isNeighbor, isSelectionFaded, heat: complexityHeat } };
     });
   }, [
     topo.nodes,
@@ -1181,6 +1339,7 @@ function useLayerDetailGraph() {
     diffContainers,
     focusContainerIds,
     selectionContainerIds,
+    complexityHeat,
   ]);
 
   // Replace aggregated edges incident to an expanded container with the
@@ -1222,14 +1381,7 @@ function useLayerDetailGraph() {
         const key = `${realSrc}|${realTgt}|${m.type}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        out.push({
-          id: `inflated-${key}`,
-          source: realSrc,
-          target: realTgt,
-          label: m.type,
-          style: { stroke: "rgba(212,165,116,0.5)", strokeWidth: 1.5 },
-          labelStyle: { fill: "#a39787", fontSize: 10 },
-        });
+        out.push(buildDirectionalEdge(`inflated-${key}`, realSrc, realTgt, m));
       }
     }
     // Add intra-container edges for each expanded container so the user
@@ -1240,14 +1392,7 @@ function useLayerDetailGraph() {
       const key = `intra|${e.source}|${e.target}|${e.type}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push({
-        id: key,
-        source: e.source,
-        target: e.target,
-        label: e.type,
-        style: { stroke: "rgba(212,165,116,0.5)", strokeWidth: 1.5 },
-        labelStyle: { fill: "#a39787", fontSize: 10 },
-      });
+      out.push(buildDirectionalEdge(key, e.source, e.target, e));
     }
     return out;
   }, [
@@ -1291,6 +1436,7 @@ function useLayerDetailGraph() {
     nodeToContainer: topo.nodeToContainer,
     containerIds,
     layoutStatus: topo.layoutStatus,
+    declutteredCount: topo.declutteredCount,
   };
 }
 
@@ -1311,6 +1457,23 @@ function GraphViewInner() {
   const pendingFocusContainer = useDashboardStore((s) => s.pendingFocusContainer);
   const setPendingFocusContainer = useDashboardStore((s) => s.setPendingFocusContainer);
   const tourFitPending = useDashboardStore((s) => s.tourFitPending);
+  // Item 88: detect filtered-to-nothing so we can show a reset affordance.
+  const hasNodeTypeFilterOff = useDashboardStore((s) =>
+    Object.values(s.nodeTypeFilters).some((v) => v === false),
+  );
+  const tagFilterSize = useDashboardStore((s) => s.tagFilter.size);
+  const complexityRange = useDashboardStore((s) => s.complexityRange);
+  const declutterLeaves = useDashboardStore((s) => s.declutterLeaves);
+  const resetStructuralFilters = useCallback(() => {
+    const st = useDashboardStore.getState();
+    st.clearTagFilter();
+    st.setComplexityRange([0, 2]);
+    if (st.declutterLeaves) st.toggleDeclutterLeaves();
+    // Re-enable any node-type categories the user switched off.
+    (["code", "config", "docs", "infra", "data", "domain", "knowledge"] as const).forEach((c) => {
+      if (st.nodeTypeFilters[c] === false) st.toggleNodeTypeFilter(c);
+    });
+  }, []);
   const { preset } = useTheme();
 
   const overviewGraph = useOverviewGraph();
@@ -1322,8 +1485,9 @@ function GraphViewInner() {
     nodeToContainer,
     containerIds,
     layoutStatus,
+    declutteredCount,
   } = navigationLevel === "overview"
-    ? { ...overviewGraph, nodeToContainer: undefined, containerIds: undefined }
+    ? { ...overviewGraph, nodeToContainer: undefined, containerIds: undefined, declutteredCount: 0 }
     : detailGraph;
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
@@ -1511,10 +1675,30 @@ function GraphViewInner() {
   if (!graph) {
     return (
       <div className="h-full w-full flex items-center justify-center bg-root rounded-lg">
-        <p className="text-text-muted text-sm">No knowledge graph loaded</p>
+        <div className="flex flex-col items-center gap-3 text-center px-8">
+          <span className="text-4xl opacity-70">🗺️</span>
+          <p className="text-text-primary text-sm font-medium">No knowledge graph loaded</p>
+          <p className="text-text-muted text-xs max-w-[280px]">
+            Run <span className="font-mono text-text-secondary">/understand</span> on a codebase to
+            generate a graph, then reload this dashboard.
+          </p>
+        </div>
       </div>
     );
   }
+
+  // Item 88: any structural filter that could empty the canvas.
+  const anyStructuralFilterActive =
+    hasNodeTypeFilterOff ||
+    tagFilterSize > 0 ||
+    complexityRange[0] > 0 ||
+    complexityRange[1] < 2 ||
+    declutterLeaves;
+  const filteredToNothing =
+    navigationLevel === "layer-detail" &&
+    layoutStatus === "ready" &&
+    nodes.length === 0 &&
+    anyStructuralFilterActive;
 
   return (
     <div className="h-full w-full relative">
@@ -1530,6 +1714,19 @@ function GraphViewInner() {
           </button>
         </div>
       )}
+      {/* Item 48: declutter status banner */}
+      {navigationLevel === "layer-detail" && declutterLeaves && declutteredCount > 0 && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10">
+          <button
+            onClick={() => useDashboardStore.getState().toggleDeclutterLeaves()}
+            className="px-3 py-1.5 rounded-full bg-elevated border border-border-medium text-text-secondary text-[11px] font-medium hover:text-text-primary hover:border-gold/40 transition-colors flex items-center gap-2 shadow-lg"
+            title="Declutter is hiding low-connectivity leaf nodes. Click to show them."
+          >
+            <span>+{declutteredCount} leaf nodes hidden</span>
+            <span className="text-gold uppercase tracking-wider text-[10px]">show</span>
+          </button>
+        </div>
+      )}
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -1541,6 +1738,8 @@ function GraphViewInner() {
         onMove={navigationLevel === "layer-detail" ? onMove : undefined}
         onInit={setReactFlowInstance}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
+        onlyRenderVisibleElements
         nodesDraggable={false}
         nodesConnectable={false}
         edgesFocusable={false}
@@ -1561,7 +1760,26 @@ function GraphViewInner() {
         />
         <TourFitView />
         <SelectedNodeFitView />
+        <LODController />
       </ReactFlow>
+      {/* Item 88: filtered-to-nothing empty state */}
+      {filteredToNothing && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div className="pointer-events-auto flex flex-col items-center gap-3 rounded-xl border border-border-medium bg-surface/90 px-8 py-6 shadow-2xl text-center">
+            <span className="text-3xl">🔍</span>
+            <p className="text-sm text-text-primary font-medium">No nodes match the current filters</p>
+            <p className="text-xs text-text-muted max-w-[260px]">
+              Your node-type, tag, complexity, or declutter settings hid everything in this layer.
+            </p>
+            <button
+              onClick={resetStructuralFilters}
+              className="mt-1 px-4 py-1.5 rounded-lg bg-gold/15 text-gold text-xs font-semibold uppercase tracking-wider hover:bg-gold/25 transition-colors"
+            >
+              Reset filters
+            </button>
+          </div>
+        </div>
+      )}
       {(layoutStatus === "computing" || tourFitPending) && (
         <div
           style={{

@@ -1,7 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useDashboardStore, ALL_NODE_TYPES, ALL_COMPLEXITIES, ALL_EDGE_CATEGORIES } from "../store";
 import type { NodeType, Complexity, EdgeCategory } from "../store";
 import { useI18n } from "../contexts/I18nContext";
+
+const COMPLEXITY_LABELS = ["simple", "moderate", "complex"] as const;
 
 export default function FilterPanel() {
   const graph = useDashboardStore((s) => s.graph);
@@ -11,6 +13,15 @@ export default function FilterPanel() {
   const hasActiveFilters = useDashboardStore((s) => s.hasActiveFilters);
   const filterPanelOpen = useDashboardStore((s) => s.filterPanelOpen);
   const toggleFilterPanel = useDashboardStore((s) => s.toggleFilterPanel);
+  // Items 70/71: tag facet + complexity range — these drive the structural
+  // graph directly (separate from the export-time `filters` above).
+  const tagFilter = useDashboardStore((s) => s.tagFilter);
+  const toggleTagFilter = useDashboardStore((s) => s.toggleTagFilter);
+  const clearTagFilter = useDashboardStore((s) => s.clearTagFilter);
+  const complexityRange = useDashboardStore((s) => s.complexityRange);
+  const setComplexityRange = useDashboardStore((s) => s.setComplexityRange);
+  const onlyComplex = useDashboardStore((s) => s.onlyComplex);
+  const toggleOnlyComplex = useDashboardStore((s) => s.toggleOnlyComplex);
   const { t } = useI18n();
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -19,6 +30,19 @@ export default function FilterPanel() {
   const allComplexities = ALL_COMPLEXITIES;
   const allEdgeCategories = ALL_EDGE_CATEGORIES;
   const layers = graph?.layers ?? [];
+
+  // Item 70: top-N tags by frequency across the graph.
+  const topTags = useMemo(() => {
+    if (!graph) return [] as { tag: string; count: number }[];
+    const counts = new Map<string, number>();
+    for (const n of graph.nodes) {
+      for (const tg of n.tags ?? []) counts.set(tg, (counts.get(tg) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 12);
+  }, [graph]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -73,7 +97,11 @@ export default function FilterPanel() {
     setFilters({ edgeCategories: newCategories });
   };
 
-  const isActive = hasActiveFilters();
+  const isActive =
+    hasActiveFilters() ||
+    tagFilter.size > 0 ||
+    complexityRange[0] > 0 ||
+    complexityRange[1] < 2;
 
   return (
     <div ref={containerRef} className="relative">
@@ -151,6 +179,94 @@ export default function FilterPanel() {
               </div>
             </div>
 
+            {/* Complexity range slider + only-complex quick button (item 71) */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider">
+                  Complexity range
+                </h3>
+                <button
+                  onClick={toggleOnlyComplex}
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded border transition-colors ${
+                    onlyComplex
+                      ? "border-[#c97070]/50 bg-[#c97070]/10 text-[#c97070]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  Only complex
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-text-muted w-12 shrink-0">Min</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={2}
+                  step={1}
+                  value={complexityRange[0]}
+                  onChange={(e) => setComplexityRange([Number(e.target.value), complexityRange[1]])}
+                  className="flex-1 accent-gold"
+                />
+                <span className="text-[10px] text-text-secondary capitalize w-16 text-right shrink-0">
+                  {COMPLEXITY_LABELS[complexityRange[0]]}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 mt-1.5">
+                <span className="text-[10px] text-text-muted w-12 shrink-0">Max</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={2}
+                  step={1}
+                  value={complexityRange[1]}
+                  onChange={(e) => setComplexityRange([complexityRange[0], Number(e.target.value)])}
+                  className="flex-1 accent-gold"
+                />
+                <span className="text-[10px] text-text-secondary capitalize w-16 text-right shrink-0">
+                  {COMPLEXITY_LABELS[complexityRange[1]]}
+                </span>
+              </div>
+            </div>
+
+            {/* Tag facet — multi-select top tags (item 70) */}
+            {topTags.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider">
+                    Tags
+                  </h3>
+                  {tagFilter.size > 0 && (
+                    <button
+                      onClick={clearTagFilter}
+                      className="text-[10px] text-gold hover:text-gold-bright transition-colors"
+                    >
+                      Clear ({tagFilter.size})
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {topTags.map(({ tag, count }) => {
+                    const active = tagFilter.has(tag);
+                    return (
+                      <button
+                        key={tag}
+                        onClick={() => toggleTagFilter(tag)}
+                        className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
+                          active
+                            ? "border-gold bg-gold/15 text-gold"
+                            : "border-border-subtle bg-elevated text-text-secondary hover:text-text-primary"
+                        }`}
+                        title={`${count} node${count === 1 ? "" : "s"}`}
+                      >
+                        {tag}
+                        <span className="ml-1 text-text-muted">{count}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Layers */}
             {layers.length > 0 && (
               <div>
@@ -205,7 +321,11 @@ export default function FilterPanel() {
             {/* Reset Button */}
             {isActive && (
               <button
-                onClick={resetFilters}
+                onClick={() => {
+                  resetFilters();
+                  clearTagFilter();
+                  setComplexityRange([0, 2]);
+                }}
                 className="w-full px-3 py-1.5 text-sm bg-elevated hover:bg-gold/20 text-text-secondary hover:text-gold rounded-lg transition-colors"
               >
                 {t.common.resetAll}

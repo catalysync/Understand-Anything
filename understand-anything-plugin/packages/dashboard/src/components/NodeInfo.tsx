@@ -266,6 +266,7 @@ export default function NodeInfo() {
 
   const navigateToNode = useDashboardStore((s) => s.navigateToNode);
   const navigateToHistoryIndex = useDashboardStore((s) => s.navigateToHistoryIndex);
+  const focusEntity = useDashboardStore((s) => s.focusEntity);
   const setFocusNode = useDashboardStore((s) => s.setFocusNode);
   const openCodeViewer = useDashboardStore((s) => s.openCodeViewer);
   const setTraceRoot = useDashboardStore((s) => s.setTraceRoot);
@@ -308,6 +309,27 @@ export default function NodeInfo() {
   const childNodes = childEdges
     .map((e) => activeGraph?.nodes.find((n) => n.id === e.target))
     .filter((n): n is GraphNode => n !== undefined);
+
+  // Item 77: group directional connections (Calls / Called-by, Imports /
+  // Imported-by, …) so the relationship reads as a verb in the right
+  // direction. Bucket key is the human directional label; each row jumps
+  // via focusEntity so it lands consistently in the current view.
+  const connectionGroups = (() => {
+    const groups = new Map<string, { id: string; name: string; type: string }[]>();
+    for (const edge of otherConnections) {
+      const isSource = edge.source === node.id;
+      const otherId = isSource ? edge.target : edge.source;
+      const otherNode = activeGraph?.nodes.find((n) => n.id === otherId);
+      const label = getDirectionalLabel(edge.type, isSource, t);
+      let bucket = groups.get(label);
+      if (!bucket) {
+        bucket = [];
+        groups.set(label, bucket);
+      }
+      bucket.push({ id: otherId, name: otherNode?.name ?? otherId, type: otherNode?.type ?? "file" });
+    }
+    return [...groups.entries()];
+  })();
 
   const knownType = node.type as NodeType;
   const typeBadge = typeBadgeColors[knownType] ?? typeBadgeColors.file;
@@ -516,37 +538,34 @@ export default function NodeInfo() {
         </div>
       )}
 
-      {/* Other connections (excluding "contains" children) */}
-      {otherConnections.length > 0 && (
-        <div>
-          <h3 className="text-[11px] font-semibold text-gold uppercase tracking-wider mb-2">
-            {t.common.connections} ({otherConnections.length})
-          </h3>
-          <div className="space-y-1.5">
-            {otherConnections.map((edge, i) => {
-              const isSource = edge.source === node.id;
-              const otherId = isSource ? edge.target : edge.source;
-              const otherNode = activeGraph?.nodes.find((n) => n.id === otherId);
-              const dirLabel = getDirectionalLabel(edge.type, isSource, t);
-              const arrow = isSource ? "\u2192" : "\u2190";
-
-              return (
-                <div
-                  key={i}
-                  className="text-xs bg-elevated rounded-lg px-3 py-2 border border-border-subtle flex items-center gap-2 cursor-pointer hover:border-gold/40 hover:bg-gold/5 transition-colors"
-                  onClick={() => {
-                    navigateToNode(otherId);
-                  }}
-                >
-                  <span className="text-gold font-mono">{arrow}</span>
-                  <span className="text-text-muted">{dirLabel}</span>
-                  <span className="text-text-primary truncate">
-                    {otherNode?.name ?? otherId}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
+      {/* Other connections \u2014 grouped by directional relationship (item 77) */}
+      {connectionGroups.length > 0 && (
+        <div className="space-y-3">
+          {connectionGroups.map(([label, rows]) => (
+            <div key={label}>
+              <h3 className="text-[11px] font-semibold text-gold uppercase tracking-wider mb-2">
+                {label} ({rows.length})
+              </h3>
+              <div className="space-y-1.5">
+                {rows.map((row, i) => {
+                  const rowBadge = typeBadgeColors[row.type as NodeType] ?? typeBadgeColors.file;
+                  return (
+                    <div
+                      key={`${row.id}-${i}`}
+                      className="text-xs bg-elevated rounded-lg px-3 py-2 border border-border-subtle flex items-center gap-2 cursor-pointer hover:border-gold/40 hover:bg-gold/5 transition-colors"
+                      onClick={() => focusEntity(row.id)}
+                      title={`Jump to ${row.name}`}
+                    >
+                      <span className={`text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0 ${rowBadge}`}>
+                        {row.type}
+                      </span>
+                      <span className="text-text-primary truncate">{row.name}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>

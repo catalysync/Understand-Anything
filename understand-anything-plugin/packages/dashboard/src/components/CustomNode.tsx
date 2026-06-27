@@ -59,6 +59,13 @@ const complexityColors: Record<string, string> = {
   complex: "text-[#c97070]",
 };
 
+// Item 83: complexity heat overlay — green → amber → red left-bar color.
+const complexityHeatColors: Record<string, string> = {
+  simple: "#5a9e6f",
+  moderate: "#d4a574",
+  complex: "#c97070",
+};
+
 export interface CustomNodeData extends Record<string, unknown> {
   label: string;
   nodeType: string;
@@ -77,6 +84,10 @@ export interface CustomNodeData extends Record<string, unknown> {
   incomingCount?: number;
   outgoingCount?: number;
   tags?: string[];
+  /** Item 55: level-of-detail — "dot" / "name" / "full" set from viewport zoom. */
+  lod?: "dot" | "name" | "full";
+  /** Item 83: recolor the left bar by complexity (green→amber→red). */
+  heat?: boolean;
 }
 
 export type CustomFlowNode = Node<CustomNodeData, "custom">;
@@ -86,9 +97,12 @@ function CustomNodeComponent({
   data,
 }: NodeProps<CustomFlowNode>) {
   const knownType = data.nodeType as NodeType;
-  const barColor = typeColors[knownType] ?? typeColors.file;
+  const barColor = data.heat
+    ? complexityHeatColors[data.complexity] ?? complexityHeatColors.simple
+    : typeColors[knownType] ?? typeColors.file;
   const textColor = typeTextColors[knownType] ?? typeTextColors.file;
   const complexityColor = complexityColors[data.complexity] ?? complexityColors.simple;
+  const lod = data.lod ?? "full";
   const { t } = useI18n();
 
   if (import.meta.env.DEV && !(knownType in typeColors)) {
@@ -130,6 +144,38 @@ function CustomNodeComponent({
   const name = data.label ?? "unnamed";
   const truncatedName =
     name.length > 24 ? name.slice(0, 22) + "..." : name;
+
+  // Item 55: level-of-detail. When zoomed far out, render a compact dot or
+  // name-only chip so 5k nodes stay legible and cheap to paint. Handles
+  // (target/source) are kept so edges still attach.
+  if (lod === "dot") {
+    return (
+      <div
+        className={`relative rounded-full ${extraClass} cursor-pointer`}
+        style={{ width: 16, height: 16, backgroundColor: barColor, boxShadow: "0 1px 4px rgba(0,0,0,0.4)" }}
+        title={name}
+        onClick={() => data.onNodeClick?.(id)}
+      >
+        <Handle type="target" position={Position.Top} className="!opacity-0 !w-1 !h-1" />
+        <Handle type="source" position={Position.Bottom} className="!opacity-0 !w-1 !h-1" />
+      </div>
+    );
+  }
+
+  if (lod === "name") {
+    return (
+      <div
+        className={`relative flex items-center gap-1.5 rounded-md bg-elevated border border-border-subtle ${extraClass} px-2 py-1 cursor-pointer shadow-[0_2px_8px_rgba(0,0,0,0.3)] max-w-[200px]`}
+        title={name}
+        onClick={() => data.onNodeClick?.(id)}
+      >
+        <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: barColor }} />
+        <span className="text-[11px] font-heading text-text-primary truncate">{truncatedName}</span>
+        <Handle type="target" position={Position.Top} className="!bg-text-muted !w-2 !h-2" />
+        <Handle type="source" position={Position.Bottom} className="!bg-text-muted !w-2 !h-2" />
+      </div>
+    );
+  }
 
   return (
     <div

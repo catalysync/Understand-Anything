@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo, useCallback, lazy, Suspense } from "react
 import { validateGraph } from "@understand-anything/core/schema";
 import type { GraphIssue } from "@understand-anything/core/schema";
 import { useDashboardStore, setWorkspaceToken } from "./store";
-import type { Workspace } from "./store";
+import type { Workspace, ViewMode } from "./store";
 import GraphView from "./components/GraphView";
 import DomainGraphView from "./components/DomainGraphView";
 import KnowledgeGraphView from "./components/KnowledgeGraphView";
@@ -18,6 +18,7 @@ import FileExplorer from "./components/FileExplorer";
 import WarningBanner from "./components/WarningBanner";
 import TokenGate from "./components/TokenGate";
 import BookmarksPanel from "./components/BookmarksPanel";
+import JumpActions from "./components/JumpActions";
 import MobileLayout from "./components/MobileLayout";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
@@ -263,6 +264,15 @@ function DashboardContent({
   const setDetailLevel = useDashboardStore((s) => s.setDetailLevel);
   const showFunctionsInClassView = useDashboardStore((s) => s.showFunctionsInClassView);
   const toggleShowFunctionsInClassView = useDashboardStore((s) => s.toggleShowFunctionsInClassView);
+  // Structural-view options (items 46/47/48/83).
+  const structuralLayout = useDashboardStore((s) => s.structuralLayout);
+  const setStructuralLayout = useDashboardStore((s) => s.setStructuralLayout);
+  const structuralDirection = useDashboardStore((s) => s.structuralDirection);
+  const toggleStructuralDirection = useDashboardStore((s) => s.toggleStructuralDirection);
+  const declutterLeaves = useDashboardStore((s) => s.declutterLeaves);
+  const toggleDeclutterLeaves = useDashboardStore((s) => s.toggleDeclutterLeaves);
+  const complexityHeat = useDashboardStore((s) => s.complexityHeat);
+  const toggleComplexityHeat = useDashboardStore((s) => s.toggleComplexityHeat);
   const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("info");
   const [showOnboarding, setShowOnboarding] = useState(shouldShowOnboarding);
@@ -589,6 +599,78 @@ function DashboardContent({
                     {t.detailLevel.fn}
                   </button>
                 )}
+              </>
+            )}
+
+            {/* Structural layout / direction / declutter / heat controls
+                (items 46/47/48/83). Only relevant in the structural graph view. */}
+            {!isKnowledgeGraph && viewMode === "structural" && (
+              <>
+                <div className="w-px h-5 bg-border-subtle" />
+                {/* 46: layered vs force */}
+                <div className="flex items-center bg-elevated rounded-lg p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setStructuralLayout("layered")}
+                    title="Layered (hierarchical) layout"
+                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                      structuralLayout === "layered"
+                        ? "bg-accent/20 text-accent"
+                        : "text-text-muted hover:text-text-secondary"
+                    }`}
+                  >
+                    Layered
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStructuralLayout("force")}
+                    title="Force-directed layout"
+                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                      structuralLayout === "force"
+                        ? "bg-accent/20 text-accent"
+                        : "text-text-muted hover:text-text-secondary"
+                    }`}
+                  >
+                    Force
+                  </button>
+                </div>
+                {/* 47: TB ⇄ LR direction (only meaningful for layered) */}
+                {structuralLayout === "layered" && (
+                  <button
+                    type="button"
+                    onClick={toggleStructuralDirection}
+                    title="Toggle layout direction (top-to-bottom ⇄ left-to-right)"
+                    className="text-[11px] font-semibold px-2 py-1 rounded border border-border-medium bg-elevated text-text-secondary hover:text-text-primary transition-colors"
+                  >
+                    {structuralDirection === "DOWN" ? "↓ TB" : "→ LR"}
+                  </button>
+                )}
+                {/* 48: declutter */}
+                <button
+                  type="button"
+                  onClick={toggleDeclutterLeaves}
+                  title="Declutter — hide low-connectivity leaf nodes"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    declutterLeaves
+                      ? "border-gold/50 bg-gold/10 text-gold"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  Declutter
+                </button>
+                {/* 83: complexity heat */}
+                <button
+                  type="button"
+                  onClick={toggleComplexityHeat}
+                  title="Complexity heat — recolor nodes green→amber→red by complexity"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    complexityHeat
+                      ? "border-[#c97070]/50 bg-[#c97070]/10 text-[#c97070]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  Heat
+                </button>
               </>
             )}
             <div className="flex items-center gap-1">

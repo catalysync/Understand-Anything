@@ -32,6 +32,31 @@ export type EdgeCategory = "structural" | "behavioral" | "data-flow" | "dependen
 export type ViewMode = "structural" | "domain" | "knowledge" | "trace";
 export type DetailLevel = "file" | "class";
 
+/** Structural-view layout engine: ELK layered (hierarchical) vs d3-force. */
+export type StructuralLayout = "layered" | "force";
+/** ELK primary direction for the layered structural layout. */
+export type StructuralDirection = "DOWN" | "RIGHT";
+
+const STRUCT_LAYOUT_KEY = "ua-structural-layout-v1";
+const STRUCT_DIRECTION_KEY = "ua-structural-direction-v1";
+
+function readPersisted<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const v = window.localStorage.getItem(key);
+    if (v && (allowed as readonly string[]).includes(v)) return v as T;
+  } catch { /* ignore */ }
+  return fallback;
+}
+
+function persist(key: string, value: string): void {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.setItem(key, value); } catch { /* ignore */ }
+}
+
+/** Numeric rank for a complexity value — drives the complexity range slider (70/71/83). */
+export const COMPLEXITY_RANK: Record<Complexity, number> = { simple: 0, moderate: 1, complex: 2 };
+
 export interface FilterState {
   nodeTypes: Set<NodeType>;
   complexities: Set<Complexity>;
@@ -240,6 +265,30 @@ interface DashboardStore {
   setDetailLevel: (level: DetailLevel) => void;
   showFunctionsInClassView: boolean;
   toggleShowFunctionsInClassView: () => void;
+
+  // ---- Structural-view options (items 46/47/48/70/71/83) ---------------
+  /** 46: layered (ELK hierarchical) vs force-directed layout. Persisted. */
+  structuralLayout: StructuralLayout;
+  setStructuralLayout: (layout: StructuralLayout) => void;
+  /** 47: ELK primary direction DOWN (TB) vs RIGHT (LR). Persisted. */
+  structuralDirection: StructuralDirection;
+  toggleStructuralDirection: () => void;
+  /** 48: hide low-degree leaf file nodes, surfaced as a +N badge on parent. */
+  declutterLeaves: boolean;
+  toggleDeclutterLeaves: () => void;
+  /** 71: inclusive [minRank, maxRank] complexity window (0=simple..2=complex). */
+  complexityRange: [number, number];
+  setComplexityRange: (range: [number, number]) => void;
+  /** 71: quick toggle — show only complex nodes (range [2,2]) vs all. */
+  onlyComplex: boolean;
+  toggleOnlyComplex: () => void;
+  /** 70: multi-select tag facet. Empty = no tag constraint. */
+  tagFilter: Set<string>;
+  toggleTagFilter: (tag: string) => void;
+  clearTagFilter: () => void;
+  /** 83: recolor nodes green→amber→red by complexity. */
+  complexityHeat: boolean;
+  toggleComplexityHeat: () => void;
 
   setGraph: (graph: KnowledgeGraph) => void;
   selectNode: (nodeId: string | null) => void;
@@ -572,6 +621,99 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       expandedContainers: new Set(),
       pendingFocusContainer: null,
     })),
+
+  // ---- Structural-view options ----------------------------------------
+  // Layout/direction changes alter every position, so drop the container
+  // caches exactly like detailLevel/filter changes do.
+  structuralLayout: readPersisted<StructuralLayout>(STRUCT_LAYOUT_KEY, ["layered", "force"], "layered"),
+  setStructuralLayout: (layout) => {
+    persist(STRUCT_LAYOUT_KEY, layout);
+    set({
+      structuralLayout: layout,
+      containerLayoutCache: new Map(),
+      containerSizeMemory: new Map(),
+      expandedContainers: new Set(),
+      pendingFocusContainer: null,
+    });
+  },
+  structuralDirection: readPersisted<StructuralDirection>(STRUCT_DIRECTION_KEY, ["DOWN", "RIGHT"], "DOWN"),
+  toggleStructuralDirection: () =>
+    set((state) => {
+      const next = state.structuralDirection === "DOWN" ? "RIGHT" : "DOWN";
+      persist(STRUCT_DIRECTION_KEY, next);
+      return {
+        structuralDirection: next,
+        containerLayoutCache: new Map(),
+        containerSizeMemory: new Map(),
+        expandedContainers: new Set(),
+        pendingFocusContainer: null,
+      };
+    }),
+  declutterLeaves: false,
+  toggleDeclutterLeaves: () =>
+    set((state) => ({
+      declutterLeaves: !state.declutterLeaves,
+      containerLayoutCache: new Map(),
+      containerSizeMemory: new Map(),
+      expandedContainers: new Set(),
+      pendingFocusContainer: null,
+    })),
+  complexityRange: [0, 2],
+  setComplexityRange: (range) =>
+    set((state) => {
+      const lo = Math.max(0, Math.min(2, Math.min(range[0], range[1])));
+      const hi = Math.max(0, Math.min(2, Math.max(range[0], range[1])));
+      if (lo === state.complexityRange[0] && hi === state.complexityRange[1]) return {};
+      return {
+        complexityRange: [lo, hi],
+        onlyComplex: lo === 2 && hi === 2,
+        containerLayoutCache: new Map(),
+        containerSizeMemory: new Map(),
+        expandedContainers: new Set(),
+        pendingFocusContainer: null,
+      };
+    }),
+  onlyComplex: false,
+  toggleOnlyComplex: () =>
+    set((state) => {
+      const next = !state.onlyComplex;
+      return {
+        onlyComplex: next,
+        complexityRange: next ? [2, 2] : [0, 2],
+        containerLayoutCache: new Map(),
+        containerSizeMemory: new Map(),
+        expandedContainers: new Set(),
+        pendingFocusContainer: null,
+      };
+    }),
+  tagFilter: new Set<string>(),
+  toggleTagFilter: (tag) =>
+    set((state) => {
+      const next = new Set(state.tagFilter);
+      if (next.has(tag)) next.delete(tag);
+      else next.add(tag);
+      return {
+        tagFilter: next,
+        containerLayoutCache: new Map(),
+        containerSizeMemory: new Map(),
+        expandedContainers: new Set(),
+        pendingFocusContainer: null,
+      };
+    }),
+  clearTagFilter: () =>
+    set((state) =>
+      state.tagFilter.size === 0
+        ? {}
+        : {
+            tagFilter: new Set<string>(),
+            containerLayoutCache: new Map(),
+            containerSizeMemory: new Map(),
+            expandedContainers: new Set(),
+            pendingFocusContainer: null,
+          },
+    ),
+  complexityHeat: false,
+  toggleComplexityHeat: () => set((s) => ({ complexityHeat: !s.complexityHeat })),
 
   setGraph: (graph) => {
     const searchEngine = new SearchEngine(graph.nodes);

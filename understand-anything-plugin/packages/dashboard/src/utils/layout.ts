@@ -203,6 +203,17 @@ export const ELK_DEFAULT_LAYOUT_OPTIONS: Record<string, string> = {
   "elk.padding": "[top=40,left=20,right=20,bottom=20]",
 };
 
+/**
+ * Structural-view ELK options for a chosen primary direction (item 47:
+ * TB⇄LR toggle). "DOWN" = top-to-bottom (default), "RIGHT" = left-to-right.
+ * Returns a fresh object so callers can mutate/spread safely.
+ */
+export function elkLayoutOptionsForDirection(
+  direction: "DOWN" | "RIGHT",
+): Record<string, string> {
+  return { ...ELK_DEFAULT_LAYOUT_OPTIONS, "elk.direction": direction };
+}
+
 export function nodesToElkInput(
   nodes: Node[],
   edges: Edge[],
