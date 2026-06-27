@@ -59,7 +59,7 @@ import {
 import { deriveContainers } from "../utils/containers";
 import type { DerivedContainer } from "../utils/containers";
 import { computeLayerStats } from "../utils/layerStats";
-import { reachableFrom, deadCodeSet, buildCoverageInfo, impactedTests, hasCoverageData } from "../utils/opsLayer";
+import { reachableFrom, deadCodeSet, buildCoverageInfo, impactedTests, hasCoverageData, errorPropagation, swallowedErrorNodeIds, buildInstrumentationInfo, hasInstrumentationData } from "../utils/opsLayer";
 
 const nodeTypes = {
   custom: CustomNode,
@@ -1151,6 +1151,11 @@ function useLayerDetailGraph() {
   // 300-series items 39-45: tri-state coverage overlay + test-impact highlight.
   const coverageOverlay = useDashboardStore((s) => s.coverageOverlay);
   const testImpactRootId = useDashboardStore((s) => s.testImpactRootId);
+  // 300-series items 92-95 + 99/101-102: error-propagation + swallowed markers
+  // + instrumentation heat overlays.
+  const errorPropRootId = useDashboardStore((s) => s.errorPropRootId);
+  const swallowedMarkers = useDashboardStore((s) => s.swallowedMarkers);
+  const instrumentationHeat = useDashboardStore((s) => s.instrumentationHeat);
   const graph = useDashboardStore((s) => s.graph);
 
   const handleNodeSelect = useCallback(
@@ -1303,6 +1308,24 @@ function useLayerDetailGraph() {
     return new Set(tests.map((t) => t.id));
   }, [graph, testImpactRootId]);
 
+  // 300-series items 92-94: error-propagation highlight (raise/path/handler).
+  const errorProp = useMemo(
+    () => (graph && errorPropRootId ? errorPropagation(graph, errorPropRootId) : null),
+    [graph, errorPropRootId],
+  );
+
+  // 300-series item 95: swallowed-error node set (badged when markers on).
+  const swallowedSet = useMemo(
+    () => (graph && swallowedMarkers ? swallowedErrorNodeIds(graph) : null),
+    [graph, swallowedMarkers],
+  );
+
+  // 300-series item 99/101-102: instrumentation heat (only when overlay on).
+  const instrumentationInfo = useMemo(
+    () => (graph && instrumentationHeat ? buildInstrumentationInfo(graph) : null),
+    [graph, instrumentationHeat],
+  );
+
   // Combine Stage 1 nodes with Stage 2 expanded children, then apply the
   // visual overlay (selection, search, tour) to every CustomFlowNode in
   // the combined set. Container nodes get their own overlay branch.
@@ -1382,6 +1405,20 @@ function useLayerDetailGraph() {
       const coverageTestCount = cov ? cov.testCount : 0;
       const isTestImpacted = impactedTestIds?.has(node.id) ?? false;
 
+      // 300-series instrumentation heat + swallowed + error-prop state.
+      const instr = instrumentationInfo?.get(node.id);
+      const instrumentation = instr ? instr.state : null;
+      const isSwallowed = swallowedSet?.has(node.id) ?? false;
+      const errRole: "raise" | "path" | "handler" | null = errorProp
+        ? errorProp.handlerIds.has(node.id)
+          ? "handler"
+          : errorProp.raiseIds.has(node.id)
+            ? "raise"
+            : errorProp.pathIds.has(node.id)
+              ? "path"
+              : null
+        : null;
+
       // Skip creating a new object if nothing visual changed
       if (
         data.isHighlighted === isHighlighted &&
@@ -1393,12 +1430,15 @@ function useLayerDetailGraph() {
         data.heat === complexityHeat &&
         data.coverage === coverage &&
         data.coverageTestCount === coverageTestCount &&
-        data.isTestImpacted === isTestImpacted
+        data.isTestImpacted === isTestImpacted &&
+        data.instrumentation === instrumentation &&
+        data.isSwallowed === isSwallowed &&
+        data.errRole === errRole
       ) {
         return node;
       }
 
-      return { ...node, data: { ...data, isHighlighted, searchScore, isSelected, isTourHighlighted, isNeighbor, isSelectionFaded, heat: complexityHeat, coverage, coverageTestCount, isTestImpacted } };
+      return { ...node, data: { ...data, isHighlighted, searchScore, isSelected, isTourHighlighted, isNeighbor, isSelectionFaded, heat: complexityHeat, coverage, coverageTestCount, isTestImpacted, instrumentation, isSwallowed, errRole } };
     });
   }, [
     topo.nodes,
@@ -1415,6 +1455,9 @@ function useLayerDetailGraph() {
     complexityHeat,
     coverageInfo,
     impactedTestIds,
+    instrumentationInfo,
+    swallowedSet,
+    errorProp,
   ]);
 
   // Replace aggregated edges incident to an expanded container with the
@@ -1522,6 +1565,16 @@ function GraphViewInner() {
   // 300-series item 39: coverage legend state (overlay flag + data presence).
   const coverageOverlayOn = useDashboardStore((s) => s.coverageOverlay);
   const graphHasCoverage = useMemo(() => hasCoverageData(graph), [graph]);
+  // 300-series item 99/101-102: instrumentation heat legend state.
+  const instrumentationHeatOn = useDashboardStore((s) => s.instrumentationHeat);
+  const graphHasInstrumentation = useMemo(() => hasInstrumentationData(graph), [graph]);
+  // 300-series items 92-94: error-propagation banner state.
+  const errorPropRootId = useDashboardStore((s) => s.errorPropRootId);
+  const setErrorPropRoot = useDashboardStore((s) => s.setErrorPropRoot);
+  const errorPropRootNode = useMemo(
+    () => (graph && errorPropRootId ? graph.nodes.find((n) => n.id === errorPropRootId) ?? null : null),
+    [graph, errorPropRootId],
+  );
   const navigationLevel = useDashboardStore((s) => s.navigationLevel);
   const activeLayerId = useDashboardStore((s) => s.activeLayerId);
   const selectNode = useDashboardStore((s) => s.selectNode);
@@ -1864,6 +1917,54 @@ function GraphViewInner() {
               No coverage edges in the graph yet — enrich with <span className="font-mono">tested_by</span>/<span className="font-mono">covers</span>.
             </div>
           )}
+        </div>
+      )}
+      {/* 300-series item 99/101-102: instrumentation heat legend */}
+      {instrumentationHeatOn && (
+        <div className="absolute bottom-4 left-44 z-10 rounded-lg border border-border-subtle bg-surface/90 px-3 py-2 shadow-xl backdrop-blur-sm">
+          <div className="text-[9px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">
+            Instrumentation
+          </div>
+          {graphHasInstrumentation ? (
+            <div className="flex flex-col gap-1">
+              {([
+                ["instrumented", "#5a9e6f", "Instrumented"],
+                ["auto", "#d4a574", "Auto-covered"],
+                ["dark", "#c97070", "Telemetry-dark"],
+              ] as const).map(([key, color, label]) => (
+                <div key={key} className="flex items-center gap-1.5 text-[10px] text-text-secondary">
+                  <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: color }} />
+                  {label}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-[10px] text-text-muted max-w-[170px]">
+              No telemetry in the graph yet — enrich with <span className="font-mono">log_site</span>/<span className="font-mono">span_site</span>/<span className="font-mono">metric</span>.
+            </div>
+          )}
+        </div>
+      )}
+      {/* 300-series items 92-94: error-propagation banner (active root) */}
+      {errorPropRootNode && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3 rounded-lg border border-[#d35d6e]/40 bg-surface/95 px-4 py-2 shadow-xl backdrop-blur-sm">
+          <span className="text-[#d35d6e]" aria-hidden>✕</span>
+          <div className="text-[11px] text-text-secondary">
+            Error propagation from{" "}
+            <span className="font-semibold text-text-primary">{errorPropRootNode.name}</span>
+            <span className="ml-2 text-[10px] text-text-muted">
+              <span className="text-[#d35d6e]">●</span> raise{" "}
+              <span className="text-[#d35d6e]/60">●</span> path{" "}
+              <span className="text-[#5a9e6f]">●</span> handler
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorPropRoot(null)}
+            className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded border border-border-medium text-text-muted hover:text-text-primary transition-colors"
+          >
+            Clear
+          </button>
         </div>
       )}
       {/* Item 88: filtered-to-nothing empty state */}

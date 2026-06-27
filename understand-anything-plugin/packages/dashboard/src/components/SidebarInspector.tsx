@@ -14,7 +14,7 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useDashboardStore } from "../store";
 import { useI18n } from "../contexts/I18nContext";
-import NodeInfo from "./NodeInfo";
+import NodeInspectorTabs from "./NodeInspectorTabs";
 import ProjectOverview from "./ProjectOverview";
 import FileExplorer from "./FileExplorer";
 
@@ -378,7 +378,7 @@ export default function SidebarInspector() {
           <SavedTab />
         ) : (
           <>
-            {selectedNodeId && <NodeInfo />}
+            {selectedNodeId && <NodeInspectorTabs />}
             {isLearnMode && (
               <Suspense fallback={null}>
                 <LearnPanel />

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { useDashboardStore } from "../store";
 import { useI18n } from "../contexts/I18nContext";
 import type { NodeType, KnowledgeGraph, GraphNode } from "@understand-anything/core/types";
@@ -11,6 +12,12 @@ import {
   dataFootprint,
   envVarsForCode,
   impactedTests,
+  observabilityFor,
+  logSiteDetail,
+  uncaughtErrorsFor,
+  raiseSites,
+  handlerSites,
+  swallowedErrorsFor,
   CODE_TYPES,
 } from "../utils/opsLayer";
 
@@ -602,6 +609,227 @@ function DataFootprintSection({ node, graph }: { node: GraphNode; graph: Knowled
   );
 }
 
+/**
+ * 300-series items 99/103: Observability section. For a code node lists its
+ * log_site (level + template), span_site, metric nodes emitted, plus alerts.
+ * For an error_type node it shows raise sites + handlers (the stack-trace ends).
+ */
+function ObservabilitySection({ node, graph }: { node: GraphNode; graph: KnowledgeGraph }) {
+  const focusEntity = useDashboardStore((s) => s.focusEntity);
+  if (!CODE_TYPES.has(node.type)) return null;
+
+  const obs = observabilityFor(graph, node.id);
+  const total = obs.logs.length + obs.spans.length + obs.metrics.length + obs.alerts.length;
+  if (total === 0) return null;
+
+  const row = (n: GraphNode, extra?: ReactNode) => (
+    <button
+      key={n.id}
+      type="button"
+      onClick={() => focusEntity(n.id, { view: "structural" })}
+      className="w-full flex items-center gap-2 text-xs bg-elevated rounded-lg px-3 py-1.5 border border-border-subtle hover:border-node-observability/40 text-left transition-colors"
+      title={`Jump to ${n.name}`}
+    >
+      <span className="text-node-observability shrink-0" aria-hidden>{nodeTypeIcon(n.type)}</span>
+      <span className="text-text-primary truncate flex-1">{n.name}</span>
+      {extra}
+    </button>
+  );
+
+  return (
+    <div className="mb-4 space-y-2">
+      <h3 className="text-[11px] font-semibold text-node-observability uppercase tracking-wider">
+        Observability
+      </h3>
+      {obs.logs.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">Logs ({obs.logs.length})</div>
+          {obs.logs.map((n) => {
+            const { level, template } = logSiteDetail(n);
+            return row(
+              n,
+              <span className="flex items-center gap-1.5 shrink-0 max-w-[55%]">
+                {level && (
+                  <span className="text-[8px] font-bold uppercase px-1 rounded bg-node-observability/15 text-node-observability shrink-0">
+                    {level}
+                  </span>
+                )}
+                {template && (
+                  <span className="font-mono text-[10px] text-text-muted truncate" title={template}>{template}</span>
+                )}
+              </span>,
+            );
+          })}
+        </div>
+      )}
+      {obs.spans.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">Spans ({obs.spans.length})</div>
+          {obs.spans.map((n) => row(n))}
+        </div>
+      )}
+      {obs.metrics.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">Metrics ({obs.metrics.length})</div>
+          {obs.metrics.map((n) => row(n))}
+        </div>
+      )}
+      {obs.alerts.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">Alerts ({obs.alerts.length})</div>
+          {obs.alerts.map((n) => row(
+            n,
+            n.severity ? (
+              <span className="text-[8px] font-bold uppercase px-1 rounded bg-[#c97070]/15 text-[#c97070] shrink-0">{n.severity}</span>
+            ) : undefined,
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 300-series items 92-95: Error-propagation section.
+ *   • code node → "This function can fail with…" (transitive uncaught errors)
+ *     + swallowed-error warnings + a "Show propagation" overlay toggle.
+ *   • error_type node → raise sites + handlers, + a "Trace propagation" overlay.
+ */
+function ErrorPropagationSection({ node, graph }: { node: GraphNode; graph: KnowledgeGraph }) {
+  const focusEntity = useDashboardStore((s) => s.focusEntity);
+  const setErrorPropRoot = useDashboardStore((s) => s.setErrorPropRoot);
+  const setViewMode = useDashboardStore((s) => s.setViewMode);
+  const errorPropRootId = useDashboardStore((s) => s.errorPropRootId);
+
+  const isCode = CODE_TYPES.has(node.type);
+  const isError = node.type === "error_type";
+  if (!isCode && !isError) return null;
+
+  const uncaught = isCode ? uncaughtErrorsFor(graph, node.id) : [];
+  const swallowed = isCode ? swallowedErrorsFor(graph, node.id) : [];
+  const raises = isError ? raiseSites(graph, node.id) : [];
+  const handlers = isError ? handlerSites(graph, node.id) : [];
+
+  const hasAnything =
+    uncaught.length > 0 || swallowed.length > 0 || raises.length > 0 || handlers.length > 0;
+  if (!hasAnything) return null;
+
+  const active = errorPropRootId === node.id;
+  const toggleOverlay = () => {
+    setErrorPropRoot(active ? null : node.id);
+    if (!active) setViewMode("structural");
+  };
+
+  const sevColor = (sev?: string) =>
+    sev === "critical" || sev === "error" ? "#d35d6e" : sev === "warning" ? "#d4a574" : "#a78bda";
+
+  return (
+    <div className="mb-4 space-y-2">
+      <div className="flex items-center justify-between">
+        <h3 className="text-[11px] font-semibold text-node-error uppercase tracking-wider">
+          {isError ? "Propagation" : "Failure modes"}
+        </h3>
+        <button
+          type="button"
+          onClick={toggleOverlay}
+          className={`text-[9px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded border transition-colors ${
+            active
+              ? "border-[#d35d6e]/60 bg-[#d35d6e]/15 text-[#d35d6e]"
+              : "border-border-subtle text-text-muted hover:text-[#d35d6e] hover:border-[#d35d6e]/40"
+          }`}
+          title="Highlight the static stack-trace propagation set on the graph"
+        >
+          {active ? "✓ Tracing" : "Show propagation"}
+        </button>
+      </div>
+
+      {/* Code node: "This function can fail with…" */}
+      {isCode && uncaught.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">
+            This function can fail with ({uncaught.length})
+          </div>
+          {uncaught.map((u) => (
+            <button
+              key={u.error.id}
+              type="button"
+              onClick={() => focusEntity(u.error.id, { view: "structural" })}
+              className="w-full flex items-center gap-2 text-xs bg-elevated rounded-lg px-3 py-1.5 border border-border-subtle hover:border-node-error/40 text-left transition-colors"
+              title={u.raisedBy ? `Raised transitively via ${u.raisedBy.name}` : "Raised directly"}
+            >
+              <span className="shrink-0" style={{ color: sevColor(u.error.severity) }} aria-hidden>✕</span>
+              <span className="text-text-primary truncate flex-1">{u.error.name}</span>
+              {u.error.severity && (
+                <span className="text-[8px] font-bold uppercase px-1 rounded shrink-0" style={{ color: sevColor(u.error.severity), backgroundColor: `${sevColor(u.error.severity)}22` }}>
+                  {u.error.severity}
+                </span>
+              )}
+              {u.raisedBy && (
+                <span className="text-[9px] text-text-muted truncate max-w-[35%] shrink-0" title={u.raisedBy.name}>via {u.raisedBy.name}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Code node: swallowed-error warnings */}
+      {isCode && swallowed.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-[#d4a574] flex items-center gap-1">
+            <span aria-hidden>⚠</span> Swallows ({swallowed.length})
+          </div>
+          {swallowed.map((e) => (
+            <button
+              key={e.id}
+              type="button"
+              onClick={() => focusEntity(e.id, { view: "structural" })}
+              className="w-full flex items-center gap-2 text-xs bg-[#d4a574]/10 rounded-lg px-3 py-1.5 border border-[#d4a574]/30 hover:border-[#d4a574]/60 text-left transition-colors"
+              title="Empty / log-only / broad catch — the error is silently swallowed"
+            >
+              <span className="text-[#d4a574] shrink-0" aria-hidden>⚠</span>
+              <span className="text-text-primary truncate flex-1">{e.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* error_type node: raise sites + handlers */}
+      {isError && raises.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">Raised by ({raises.length})</div>
+          {raises.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => focusEntity(c.id, { view: "structural" })}
+              className="w-full flex items-center gap-2 text-xs bg-elevated rounded-lg px-3 py-1.5 border border-border-subtle hover:border-node-error/40 text-left transition-colors"
+            >
+              <span className="text-[#d35d6e] shrink-0" aria-hidden>↑</span>
+              <span className="text-text-primary truncate flex-1">{c.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {isError && handlers.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">Handled by ({handlers.length})</div>
+          {handlers.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => focusEntity(c.id, { view: "structural" })}
+              className="w-full flex items-center gap-2 text-xs bg-elevated rounded-lg px-3 py-1.5 border border-border-subtle hover:border-node-function/40 text-left transition-colors"
+            >
+              <span className="text-[#5a9e6f] shrink-0" aria-hidden>✓</span>
+              <span className="text-text-primary truncate flex-1">{c.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function NodeInfo() {
   const graph = useDashboardStore((s) => s.graph);
   const selectedNodeId = useDashboardStore((s) => s.selectedNodeId);
@@ -855,6 +1083,13 @@ export default function NodeInfo() {
 
       {/* 300-series items 71-73: data footprint (tables read/written + env vars). */}
       {activeGraph && node && <DataFootprintSection node={node} graph={activeGraph} />}
+
+      {/* 300-series items 92-95: error-propagation — "can fail with…" / raise
+          sites / handlers / swallowed warnings + propagation overlay toggle. */}
+      {activeGraph && node && <ErrorPropagationSection node={node} graph={activeGraph} />}
+
+      {/* 300-series items 99/103: observability — log/span/metric/alert nodes. */}
+      {activeGraph && node && <ObservabilitySection node={node} graph={activeGraph} />}
 
       {/* Keystone: cross-layer operations connections (used_by / handles_route /
           queries_table / raises / tested_by / reads_config …). Renders nothing

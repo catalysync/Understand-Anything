@@ -312,6 +312,10 @@ function DashboardContent({
   const toggleComplexityHeat = useDashboardStore((s) => s.toggleComplexityHeat);
   const coverageOverlay = useDashboardStore((s) => s.coverageOverlay);
   const toggleCoverageOverlay = useDashboardStore((s) => s.toggleCoverageOverlay);
+  const instrumentationHeat = useDashboardStore((s) => s.instrumentationHeat);
+  const toggleInstrumentationHeat = useDashboardStore((s) => s.toggleInstrumentationHeat);
+  const swallowedMarkers = useDashboardStore((s) => s.swallowedMarkers);
+  const toggleSwallowedMarkers = useDashboardStore((s) => s.toggleSwallowedMarkers);
   const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(readSidebarWidth);
   const resizingRef = useRef(false);
@@ -819,6 +823,32 @@ function DashboardContent({
                   }`}
                 >
                   Coverage
+                </button>
+                {/* 300-series item 99/101-102: instrumentation heat overlay */}
+                <button
+                  type="button"
+                  onClick={toggleInstrumentationHeat}
+                  title="Instrumentation heat — green = emits logs/spans/metrics, amber = reachable but telemetry-less, red = telemetry-dark"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    instrumentationHeat
+                      ? "border-[#a78bda]/50 bg-[#a78bda]/10 text-[#a78bda]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  Telemetry
+                </button>
+                {/* 300-series item 95: swallowed-error markers */}
+                <button
+                  type="button"
+                  onClick={toggleSwallowedMarkers}
+                  title="Swallowed-error markers — badge nodes with an empty / log-only / broad catch"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    swallowedMarkers
+                      ? "border-[#d4a574]/50 bg-[#d4a574]/10 text-[#d4a574]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  ⚠ Swallowed
                 </button>
               </>
             )}

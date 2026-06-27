@@ -155,6 +155,12 @@ export interface CustomNodeData extends Record<string, unknown> {
   coverageTestCount?: number;
   /** 300-series item 45: node is in the impacted-test highlight set. */
   isTestImpacted?: boolean;
+  /** 300-series item 99/101-102: instrumentation heat tri-state. */
+  instrumentation?: "instrumented" | "auto" | "dark" | null;
+  /** 300-series item 95: node swallows an error (warning glyph). */
+  isSwallowed?: boolean;
+  /** 300-series items 92-94: error-propagation highlight roles. */
+  errRole?: "raise" | "path" | "handler" | null;
 }
 
 // 300-series item 39: tri-state coverage palette (green / amber / red).
@@ -162,6 +168,13 @@ const coverageColors: Record<string, string> = {
   covered: "#5a9e6f",
   partial: "#d4a574",
   uncovered: "#c97070",
+};
+
+// 300-series item 99/101-102: instrumentation heat palette.
+const instrumentationColors: Record<string, string> = {
+  instrumented: "#5a9e6f", // green — emits telemetry
+  auto: "#d4a574",         // amber — reachable but telemetry-less
+  dark: "#c97070",         // red — telemetry-dark
 };
 
 export type CustomFlowNode = Node<CustomNodeData, "custom">;
@@ -173,11 +186,15 @@ function CustomNodeComponent({
   const knownType = data.nodeType as NodeType;
   const coverageColor =
     data.coverage != null ? coverageColors[data.coverage] : undefined;
+  const instrColor =
+    data.instrumentation != null ? instrumentationColors[data.instrumentation] : undefined;
   const barColor = coverageColor
     ? coverageColor
-    : data.heat
-      ? complexityHeatColors[data.complexity] ?? complexityHeatColors.simple
-      : typeColors[knownType] ?? typeColors.file;
+    : instrColor
+      ? instrColor
+      : data.heat
+        ? complexityHeatColors[data.complexity] ?? complexityHeatColors.simple
+        : typeColors[knownType] ?? typeColors.file;
   const textColor = typeTextColors[knownType] ?? typeTextColors.file;
   const complexityColor = complexityColors[data.complexity] ?? complexityColors.simple;
   const lod = data.lod ?? "full";
@@ -222,6 +239,16 @@ function CustomNodeComponent({
   // 300-series item 45: impacted-test highlight (amber pulse ring).
   if (data.isTestImpacted) {
     extraClass += " ring-2 ring-[#d4a574] animate-accent-pulse";
+  }
+
+  // 300-series items 92-94: error-propagation roles. Raise = crimson glow,
+  // handler = green ring (terminates), path = dim crimson ring.
+  if (data.errRole === "raise") {
+    extraClass += " ring-2 ring-[#d35d6e] animate-accent-pulse";
+  } else if (data.errRole === "handler") {
+    extraClass += " ring-2 ring-[#5a9e6f]";
+  } else if (data.errRole === "path") {
+    extraClass += " ring-1 ring-[#d35d6e]/50";
   }
 
   const name = data.label ?? "unnamed";
@@ -283,6 +310,16 @@ function CustomNodeComponent({
             {data.nodeType}
           </span>
           <div className="flex items-center gap-1.5">
+            {data.isSwallowed && (
+              <span
+                className="text-[10px] leading-none text-[#d4a574]"
+                role="img"
+                aria-label="Swallows an error"
+                title="Swallows an error (empty / log-only / broad catch)"
+              >
+                ⚠
+              </span>
+            )}
             <span className={`text-[9px] font-mono ${complexityColor}`}>
               {data.complexity}
             </span>

@@ -443,6 +443,19 @@ interface DashboardStore {
   testImpactRootId: string | null;
   setTestImpactRoot: (id: string | null) => void;
 
+  // ── Error-propagation overlay (300-series items 92-95) ────────────────────
+  /** When set, highlight the static stack-trace propagation set for this error_type/code node. */
+  errorPropRootId: string | null;
+  setErrorPropRoot: (id: string | null) => void;
+  /** Badge nodes that swallow errors (item 95). Persisted. */
+  swallowedMarkers: boolean;
+  toggleSwallowedMarkers: () => void;
+
+  // ── Instrumentation-coverage heat overlay (300-series items 99/101-102) ───
+  /** Paint code nodes instrumented(green)/auto-covered(amber)/telemetry-dark(red). Persisted. */
+  instrumentationHeat: boolean;
+  toggleInstrumentationHeat: () => void;
+
   // ── Data / ERD view (300-series items 61-64) ──────────────────────────────
   /** Attribute visibility level for the ERD. Persisted. */
   erdAttrLevel: "all" | "keys" | "names";
@@ -1024,6 +1037,26 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     }),
   testImpactRootId: null,
   setTestImpactRoot: (id) => set({ testImpactRootId: id }),
+
+  // ── Error-propagation overlay (300-series items 92-95) ────────────────────
+  errorPropRootId: null,
+  setErrorPropRoot: (id) => set({ errorPropRootId: id }),
+  swallowedMarkers: readPersisted("ua-swallowed-markers-v1", ["on", "off"], "on") === "on",
+  toggleSwallowedMarkers: () =>
+    set((s) => {
+      const next = !s.swallowedMarkers;
+      persist("ua-swallowed-markers-v1", next ? "on" : "off");
+      return { swallowedMarkers: next };
+    }),
+
+  // ── Instrumentation-coverage heat overlay (300-series items 99/101-102) ───
+  instrumentationHeat: readPersisted("ua-instrumentation-heat-v1", ["on", "off"], "off") === "on",
+  toggleInstrumentationHeat: () =>
+    set((s) => {
+      const next = !s.instrumentationHeat;
+      persist("ua-instrumentation-heat-v1", next ? "on" : "off");
+      return { instrumentationHeat: next };
+    }),
 
   // ── Data / ERD view (300-series items 61-64) ──────────────────────────────
   erdAttrLevel: readPersisted("ua-erd-attr-level-v1", ["all", "keys", "names"], "all"),
