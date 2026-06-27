@@ -230,6 +230,240 @@ export function searchDomainGraph(
   return hits.sort((a, b) => rank[a.kind] - rank[b.kind]).slice(0, 40);
 }
 
+// ── 200-series domain polish long-tail (104/114/117/118/119) ────────────────
+
+/**
+ * Item 104: in/out degree of each domain over `cross_domain` edges (respecting
+ * direction). A domain with 0 inbound is an "entry" (▶); 0 outbound a
+ * "terminal" (■). Bidirectional edges count for both endpoints.
+ */
+export interface DomainDegree {
+  inDeg: number;
+  outDeg: number;
+  isEntry: boolean;
+  isTerminal: boolean;
+}
+export function domainDegrees(
+  graph: KnowledgeGraph,
+): Map<string, DomainDegree> {
+  const inDeg = new Map<string, number>();
+  const outDeg = new Map<string, number>();
+  const domainIds = graph.nodes
+    .filter((n) => n.type === "domain")
+    .map((n) => n.id);
+  for (const id of domainIds) {
+    inDeg.set(id, 0);
+    outDeg.set(id, 0);
+  }
+  const bumpOut = (id: string) => outDeg.set(id, (outDeg.get(id) ?? 0) + 1);
+  const bumpIn = (id: string) => inDeg.set(id, (inDeg.get(id) ?? 0) + 1);
+  for (const e of graph.edges) {
+    if (e.type !== "cross_domain") continue;
+    if (e.direction === "backward") {
+      bumpOut(e.target);
+      bumpIn(e.source);
+    } else if (e.direction === "bidirectional") {
+      bumpOut(e.source);
+      bumpIn(e.target);
+      bumpOut(e.target);
+      bumpIn(e.source);
+    } else {
+      bumpOut(e.source);
+      bumpIn(e.target);
+    }
+  }
+  const out = new Map<string, DomainDegree>();
+  for (const id of domainIds) {
+    const i = inDeg.get(id) ?? 0;
+    const o = outDeg.get(id) ?? 0;
+    out.set(id, {
+      inDeg: i,
+      outDeg: o,
+      // Only meaningful when the domain actually participates in some edge.
+      isEntry: i === 0 && o > 0,
+      isTerminal: o === 0 && i > 0,
+    });
+  }
+  return out;
+}
+
+/** Map domainId → flow count via contains_flow edges (items 119/103). */
+export function flowCountByDomain(graph: KnowledgeGraph): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const e of graph.edges) {
+    if (e.type === "contains_flow")
+      m.set(e.source, (m.get(e.source) ?? 0) + 1);
+  }
+  return m;
+}
+
+/**
+ * Item 114: the set of flow + step node ids that "touch" a given entity. A
+ * flow touches the entity when its owning domain lists the entity in
+ * domainMeta.entities, or the flow/step name/summary mentions it. Returns ids
+ * for dimming the rest.
+ */
+export function nodesTouchingEntity(
+  graph: KnowledgeGraph,
+  entity: string,
+): Set<string> {
+  const ent = entity.trim().toLowerCase();
+  const touched = new Set<string>();
+  if (!ent) return touched;
+
+  // domain → owns entity?
+  const domainOwns = new Set<string>();
+  for (const n of graph.nodes) {
+    if (n.type !== "domain") continue;
+    const ents = ((n.domainMeta?.entities ?? []) as string[]).map((e) =>
+      e.toLowerCase(),
+    );
+    if (ents.includes(ent)) domainOwns.add(n.id);
+  }
+  // flow → domain, step → flow lookups.
+  const flowToDomain = new Map<string, string>();
+  const stepToFlow = new Map<string, string>();
+  for (const e of graph.edges) {
+    if (e.type === "contains_flow") flowToDomain.set(e.target, e.source);
+    else if (e.type === "flow_step") stepToFlow.set(e.target, e.source);
+  }
+  const mentions = (n: GraphNode) =>
+    (n.name ?? "").toLowerCase().includes(ent) ||
+    (n.summary ?? "").toLowerCase().includes(ent);
+
+  for (const n of graph.nodes) {
+    if (n.type === "flow") {
+      const dom = flowToDomain.get(n.id);
+      if ((dom && domainOwns.has(dom)) || mentions(n)) touched.add(n.id);
+    } else if (n.type === "step") {
+      const flow = stepToFlow.get(n.id);
+      const dom = flow ? flowToDomain.get(flow) : undefined;
+      if ((dom && domainOwns.has(dom)) || mentions(n)) touched.add(n.id);
+    }
+  }
+  return touched;
+}
+
+/** All distinct entities across every domain (items 114/118), sorted. */
+export function allDomainEntities(graph: KnowledgeGraph): string[] {
+  const seen = new Set<string>();
+  for (const n of graph.nodes) {
+    if (n.type !== "domain") continue;
+    for (const e of (n.domainMeta?.entities ?? []) as string[]) {
+      const t = e.trim();
+      if (t) seen.add(t);
+    }
+  }
+  return Array.from(seen).sort((a, b) => a.localeCompare(b));
+}
+
+export interface EntityOwnership {
+  entity: string;
+  /** Domains listing this entity, by id + name. */
+  domains: { id: string; name: string }[];
+}
+/**
+ * Item 118: glossary — for each entity, which domains own/share it (case-
+ * insensitive grouping; original casing kept from the first occurrence).
+ */
+export function entityGlossary(graph: KnowledgeGraph): EntityOwnership[] {
+  const byKey = new Map<
+    string,
+    { entity: string; domains: { id: string; name: string }[] }
+  >();
+  for (const n of graph.nodes) {
+    if (n.type !== "domain") continue;
+    for (const raw of (n.domainMeta?.entities ?? []) as string[]) {
+      const t = raw.trim();
+      if (!t) continue;
+      const key = t.toLowerCase();
+      let rec = byKey.get(key);
+      if (!rec) {
+        rec = { entity: t, domains: [] };
+        byKey.set(key, rec);
+      }
+      if (!rec.domains.some((d) => d.id === n.id))
+        rec.domains.push({ id: n.id, name: n.name });
+    }
+  }
+  return Array.from(byKey.values()).sort((a, b) =>
+    a.entity.localeCompare(b.entity),
+  );
+}
+
+/** Canonical entry-type buckets (item 117). */
+export const ENTRY_TYPES = ["http", "cli", "event", "cron"] as const;
+export type EntryType = (typeof ENTRY_TYPES)[number];
+
+/** Normalise a flow's raw entryType into one of the canonical buckets. */
+export function normalizeEntryType(raw: unknown): EntryType | "other" {
+  const s = String(raw ?? "").toLowerCase();
+  if (!s) return "other";
+  if (/(http|rest|api|web|route|endpoint)/.test(s)) return "http";
+  if (/(cli|command|cmd|terminal)/.test(s)) return "cli";
+  if (/(event|queue|message|subscribe|pubsub|kafka|topic)/.test(s))
+    return "event";
+  if (/(cron|schedule|timer|job|periodic)/.test(s)) return "cron";
+  return "other";
+}
+
+/** Color per entry-type bucket (item 117 legend). */
+export const ENTRY_TYPE_COLOR: Record<EntryType | "other", string> = {
+  http: "#5b9bd5",
+  cli: "#c9a05b",
+  event: "#9b6bd5",
+  cron: "#5bc9a0",
+  other: "var(--color-text-muted)",
+};
+
+/**
+ * Item 117: map each flow id → its normalised entry-type. Reads
+ * domainMeta.entryType off flow nodes.
+ */
+export function flowEntryTypes(
+  graph: KnowledgeGraph,
+): Map<string, EntryType | "other"> {
+  const m = new Map<string, EntryType | "other">();
+  for (const n of graph.nodes) {
+    if (n.type !== "flow") continue;
+    m.set(n.id, normalizeEntryType(n.domainMeta?.entryType));
+  }
+  return m;
+}
+
+/** Distinct entry-types present across all flows (for the legend), ordered. */
+export function presentEntryTypes(
+  graph: KnowledgeGraph,
+): (EntryType | "other")[] {
+  const present = new Set<EntryType | "other">();
+  for (const v of flowEntryTypes(graph).values()) present.add(v);
+  const ordered: (EntryType | "other")[] = [...ENTRY_TYPES, "other"];
+  return ordered.filter((t) => present.has(t));
+}
+
+/**
+ * Item 188: the set of domain-graph node ids reachable within the current
+ * subgraph. For an active domain: the domain + its flows + their steps. For
+ * the overview (no active domain): all domains. Used to scope domain search.
+ */
+export function domainSubgraphNodeIds(
+  graph: KnowledgeGraph,
+  activeDomainId: string | null,
+): Set<string> {
+  const ids = new Set<string>();
+  if (!activeDomainId) {
+    for (const n of graph.nodes) if (n.type === "domain") ids.add(n.id);
+    return ids;
+  }
+  ids.add(activeDomainId);
+  const flows = flowsForDomain(graph, activeDomainId);
+  for (const { flow, steps } of flows) {
+    ids.add(flow.id);
+    for (const s of steps) ids.add(s.node.id);
+  }
+  return ids;
+}
+
 export interface DomainCoverage {
   /** Distinct file paths claimed by some domain step. */
   mappedFiles: Set<string>;

@@ -12,6 +12,8 @@ export interface StepNodeData extends Record<string, unknown> {
   order: number;
   /** Feature 93: dimmed when another flow is focused. */
   dimmed?: boolean;
+  /** Item 114: dimmed because it doesn't touch the active entity filter. */
+  entityDimmed?: boolean;
 }
 
 export type StepFlowNode = Node<StepNodeData, "step-node">;
@@ -45,7 +47,7 @@ function StepNode({ data }: NodeProps<StepFlowNode>) {
         isSelected
           ? "border-accent bg-accent/10"
           : "border-border-subtle bg-elevated hover:border-accent/40"
-      } ${diffBorder} ${data.dimmed ? "opacity-25" : ""}`}
+      } ${diffBorder} ${data.dimmed || data.entityDimmed ? "opacity-25" : ""}`}
       onClick={() => selectNode(data.stepId)}
       onContextMenu={(e) => {
         e.preventDefault();

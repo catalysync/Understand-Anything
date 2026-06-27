@@ -11,6 +11,14 @@ export interface DomainClusterData extends Record<string, unknown> {
   flowCount: number;
   businessRules?: string[];
   domainId: string;
+  /** Item 104: no inbound cross_domain edges → entry domain (▶). */
+  isEntry?: boolean;
+  /** Item 104: no outbound cross_domain edges → terminal domain (■). */
+  isTerminal?: boolean;
+  /** Item 103: storyline playback is currently highlighting this domain. */
+  storyActive?: boolean;
+  /** Item 103/114: dimmed (another domain is the active story hop / entity). */
+  dimmed?: boolean;
 }
 
 export type DomainClusterFlowNode = Node<DomainClusterData, "domain-cluster">;
@@ -36,10 +44,12 @@ function DomainClusterNode({ data }: NodeProps<DomainClusterFlowNode>) {
   return (
     <div
       className={`rounded-xl border-2 px-5 py-4 min-w-[280px] max-w-[360px] cursor-pointer transition-all ${
-        isSelected
-          ? "border-accent bg-accent/10 shadow-lg shadow-accent/10"
-          : "border-accent/40 bg-surface hover:border-accent/70"
-      }`}
+        data.storyActive
+          ? "border-accent ring-2 ring-accent/50 bg-accent/10 shadow-lg shadow-accent/20"
+          : isSelected
+            ? "border-accent bg-accent/10 shadow-lg shadow-accent/10"
+            : "border-accent/40 bg-surface hover:border-accent/70"
+      } ${data.dimmed ? "opacity-30" : ""}`}
       onClick={() => selectNode(data.domainId)}
       onDoubleClick={() => navigateToDomain(data.domainId)}
       onContextMenu={(e) => {
@@ -50,8 +60,27 @@ function DomainClusterNode({ data }: NodeProps<DomainClusterFlowNode>) {
       <Handle type="target" position={Position.Left} className="!bg-accent/60 !w-2 !h-2" />
       <Handle type="source" position={Position.Right} className="!bg-accent/60 !w-2 !h-2" />
 
-      <div className="font-heading text-sm text-accent font-semibold mb-1 truncate">
-        {data.label}
+      <div className="flex items-center gap-1.5 mb-1">
+        {/* Item 104: entry / terminal domain badges. */}
+        {data.isEntry && (
+          <span
+            title="Entry domain — no inbound cross-domain edges"
+            className="text-[9px] font-semibold px-1 py-0.5 rounded bg-[#5bc9a0]/15 text-[#5bc9a0] shrink-0"
+          >
+            ▶ entry
+          </span>
+        )}
+        {data.isTerminal && (
+          <span
+            title="Terminal domain — no outbound cross-domain edges"
+            className="text-[9px] font-semibold px-1 py-0.5 rounded bg-[#c97070]/15 text-[#c97070] shrink-0"
+          >
+            ■ terminal
+          </span>
+        )}
+        <div className="font-heading text-sm text-accent font-semibold truncate">
+          {data.label}
+        </div>
       </div>
       <div className="text-[11px] text-text-secondary line-clamp-2 mb-2">
         {data.summary}

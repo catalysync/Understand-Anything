@@ -63,6 +63,7 @@ import {
   savePinnedPositions,
 } from "./utils/pinnedPositions";
 import { parseScopes, compilePattern, regexSearch, nodeMatchesScope } from "./utils/searchScope";
+import { buildTrace } from "./components/traceGraph";
 import type { FilterPresetId } from "./utils/filterPresets";
 
 export type { OnboardingGoal };
@@ -169,6 +170,30 @@ export type StructuralDirection = "DOWN" | "RIGHT";
 
 const STRUCT_LAYOUT_KEY = "ua-structural-layout-v1";
 const STRUCT_DIRECTION_KEY = "ua-structural-direction-v1";
+// 200-series domain polish (119/188): persisted small UI prefs.
+const DOMAIN_MIN_FLOWS_KEY = "ua-domain-min-flows-v1";
+const SEARCH_SCOPED_KEY = "ua-search-scoped-v1";
+
+function readPersistedInt(key: string, fallback: number): number {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const v = window.localStorage.getItem(key);
+    if (v !== null) {
+      const n = parseInt(v, 10);
+      if (Number.isFinite(n)) return n;
+    }
+  } catch { /* ignore */ }
+  return fallback;
+}
+function readPersistedBool(key: string, fallback: boolean): boolean {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const v = window.localStorage.getItem(key);
+    if (v === "1") return true;
+    if (v === "0") return false;
+  } catch { /* ignore */ }
+  return fallback;
+}
 
 function readPersisted<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -708,6 +733,33 @@ interface DashboardStore {
   /** Feature 113: domain search query (domains/flows/steps/entities by name/summary). */
   domainSearchQuery: string;
   setDomainSearchQuery: (q: string) => void;
+
+  // ── 200-series domain polish long-tail (103/114/117/118/119/188) ──────────
+  /** Item 103: storyline playback — index of the highlighted hop (-1 = idle). */
+  storylinePlayIndex: number;
+  /** Item 103: whether playback is auto-advancing (timed walk). */
+  storylinePlaying: boolean;
+  startStorylinePlay: () => void;
+  pauseStorylinePlay: () => void;
+  stepStorylinePlay: (dir: 1 | -1) => void;
+  stopStorylinePlay: () => void;
+  /** Item 114: highlight every flow/step touching this entity (null = off). */
+  domainEntityFilter: string | null;
+  setDomainEntityFilter: (entity: string | null) => void;
+  /** Item 117: restrict the overview to flows of this entry-type (null = all). */
+  domainEntryTypeFilter: string | null;
+  setDomainEntryTypeFilter: (entryType: string | null) => void;
+  /** Item 118: entity glossary panel open. */
+  entityGlossaryOpen: boolean;
+  toggleEntityGlossary: () => void;
+  /** Item 119: hide domains with fewer than this many flows (0 = show all). Persisted. */
+  domainMinFlows: number;
+  setDomainMinFlows: (n: number) => void;
+  /** Item 188: scope search to the current view's subgraph (active domain / overview). Persisted. */
+  searchScopedToView: boolean;
+  toggleSearchScopedToView: () => void;
+  /** Item 188: structural node ids in the current view's subgraph (null = unconstrained). */
+  computeViewScopeIds: () => Set<string> | null;
   /** Feature 110/106: jump from a domain step to its source / a trace. */
   openStepFile: (stepNodeId: string) => void;
   traceStepCode: (stepNodeId: string) => void;
@@ -1771,8 +1823,60 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       }
     }
 
-    const searchResults = raw.filter((r) => inScope(r.nodeId));
+    // Item 188: when "scope to view" is on, constrain structural hits to the
+    // current view's subgraph — the active trace's reachable set (trace view)
+    // or the active layer's nodes (structural). Domain scoping is applied
+    // separately on the domain-search side (federatedSearch / DomainToolbar).
+    const viewScope = get().computeViewScopeIds();
+    const inView = (nodeId: string): boolean =>
+      viewScope === null || viewScope.has(nodeId);
+
+    const searchResults = raw.filter(
+      (r) => inScope(r.nodeId) && inView(r.nodeId),
+    );
     set({ searchQuery: query, searchResults, searchCycleIndex: -1 });
+  },
+
+  /**
+   * Item 188: the set of structural node ids inside the current view's
+   * subgraph, or null when scoping is off / not applicable (= no constraint).
+   *  - trace view: BFS-reachable set from the trace root (callees+callers).
+   *  - structural view in a layer: that layer's node ids.
+   * Domain view has its own (separate) graph, so structural search is left
+   * unconstrained there.
+   */
+  computeViewScopeIds: () => {
+    const {
+      searchScopedToView,
+      viewMode,
+      graph,
+      traceStack,
+      traceRoot,
+      traceDepth,
+      navigationLevel,
+      activeLayerId,
+    } = get();
+    if (!searchScopedToView || !graph) return null;
+    if (viewMode === "trace") {
+      const root = traceStack[traceStack.length - 1] ?? traceRoot;
+      if (!root) return null;
+      const ids = new Set<string>();
+      // Union of callees + callers reachable within the build depth.
+      for (const n of buildTrace(graph, root, traceDepth, "callees"))
+        ids.add(n.id);
+      for (const n of buildTrace(graph, root, traceDepth, "callers"))
+        ids.add(n.id);
+      return ids.size > 0 ? ids : null;
+    }
+    if (
+      viewMode === "structural" &&
+      navigationLevel === "layer-detail" &&
+      activeLayerId
+    ) {
+      const layer = graph.layers.find((l) => l.id === activeLayerId);
+      if (layer) return new Set(layer.nodeIds);
+    }
+    return null;
   },
 
   // ── Search result cycling (item 67) ────────────────────────────────────────
@@ -2550,6 +2654,9 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       nodeHistory: newHistory,
       // Entering a domain resets per-domain detail UI (focus-a-flow / accordion).
       focusedFlowId: null,
+      // Item 103: leaving the overview ends storyline playback.
+      storylinePlaying: false,
+      storylinePlayIndex: -1,
     });
   },
 
@@ -2559,6 +2666,8 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       selectedNodeId: null,
       focusNodeId: null,
       focusedFlowId: null,
+      // Item 114: entity highlight is per-domain-detail; clear on exit.
+      domainEntityFilter: null,
     });
   },
 
@@ -2581,6 +2690,51 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     set((s) => ({ domainStorylineMode: !s.domainStorylineMode })),
   domainSearchQuery: "",
   setDomainSearchQuery: (q) => set({ domainSearchQuery: q }),
+
+  // ── 200-series domain polish long-tail (103/114/117/118/119/188) ──────────
+  storylinePlayIndex: -1,
+  storylinePlaying: false,
+  startStorylinePlay: () =>
+    set((s) => ({
+      // Ensure storyline mode is on and start at the first hop.
+      domainStorylineMode: true,
+      storylinePlaying: true,
+      storylinePlayIndex: s.storylinePlayIndex < 0 ? 0 : s.storylinePlayIndex,
+    })),
+  pauseStorylinePlay: () => set({ storylinePlaying: false }),
+  stepStorylinePlay: (dir) =>
+    set((s) => {
+      const next = Math.max(0, s.storylinePlayIndex + dir);
+      return { storylinePlayIndex: next, storylinePlaying: false };
+    }),
+  stopStorylinePlay: () =>
+    set({ storylinePlaying: false, storylinePlayIndex: -1 }),
+
+  domainEntityFilter: null,
+  setDomainEntityFilter: (entity) => set({ domainEntityFilter: entity }),
+
+  domainEntryTypeFilter: null,
+  setDomainEntryTypeFilter: (entryType) =>
+    set({ domainEntryTypeFilter: entryType }),
+
+  entityGlossaryOpen: false,
+  toggleEntityGlossary: () =>
+    set((s) => ({ entityGlossaryOpen: !s.entityGlossaryOpen })),
+
+  domainMinFlows: readPersistedInt(DOMAIN_MIN_FLOWS_KEY, 0),
+  setDomainMinFlows: (n) => {
+    const v = Math.max(0, Math.min(20, Math.round(n)));
+    persist(DOMAIN_MIN_FLOWS_KEY, String(v));
+    set({ domainMinFlows: v });
+  },
+
+  searchScopedToView: readPersistedBool(SEARCH_SCOPED_KEY, false),
+  toggleSearchScopedToView: () =>
+    set((s) => {
+      const next = !s.searchScopedToView;
+      persist(SEARCH_SCOPED_KEY, next ? "1" : "0");
+      return { searchScopedToView: next };
+    }),
 
   /** Feature 110/105: focus the structural file node behind a domain step. */
   openStepFile: (stepNodeId) => {

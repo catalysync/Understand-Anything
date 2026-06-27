@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDashboardStore } from "../store";
 import { useI18n } from "../contexts/I18nContext";
 import { federatedSearch, routeForResult } from "../utils/federatedSearch";
+import { domainSubgraphNodeIds } from "../utils/domainHelpers";
 
 const typeBadgeColors: Record<string, string> = {
   file: "text-node-file border border-node-file/30 bg-node-file/10",
@@ -38,6 +39,13 @@ export default function SearchBar() {
   const searchHistory = useDashboardStore((s) => s.searchHistory);
   const commitRecentSearch = useDashboardStore((s) => s.commitRecentSearch);
   const toggleStarredSearch = useDashboardStore((s) => s.toggleStarredSearch);
+  // 200-series item 188: scope search to the current view's subgraph.
+  const viewMode = useDashboardStore((s) => s.viewMode);
+  const activeDomainId = useDashboardStore((s) => s.activeDomainId);
+  const searchScopedToView = useDashboardStore((s) => s.searchScopedToView);
+  const toggleSearchScopedToView = useDashboardStore(
+    (s) => s.toggleSearchScopedToView,
+  );
   const { t } = useI18n();
 
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -53,14 +61,39 @@ export default function SearchBar() {
     }));
     // In regex mode the store-side regexSearch already produced the matching
     // node set; keep its ordering by feeding the hits to the federator.
-    return federatedSearch(
+    const all = federatedSearch(
       searchQuery,
       graph,
       domainGraph,
       structuralHits.length > 0 ? structuralHits : undefined,
-      8,
+      24,
     );
-  }, [searchQuery, graph, domainGraph, searchResults]);
+    // Item 188: when scoping to the current view, drop domain results outside
+    // the active domain's subgraph. (Structural hits are already scoped in the
+    // store via computeViewScopeIds before they reach federatedSearch.)
+    if (
+      searchScopedToView &&
+      viewMode === "domain" &&
+      activeDomainId &&
+      domainGraph
+    ) {
+      const allowed = domainSubgraphNodeIds(domainGraph, activeDomainId);
+      return all.filter(
+        (r) => r.realm !== "domain" && r.realm !== "step"
+          ? true
+          : allowed.has(r.nodeId),
+      );
+    }
+    return all;
+  }, [
+    searchQuery,
+    graph,
+    domainGraph,
+    searchResults,
+    searchScopedToView,
+    viewMode,
+    activeDomainId,
+  ]);
 
   const topResults = federated.slice(0, 6);
   const isStarred = !!searchQuery.trim() && searchHistory.starred.includes(searchQuery.trim());
@@ -81,6 +114,28 @@ export default function SearchBar() {
     },
     [openSearchResult, commitRecentSearch, searchQuery],
   );
+
+  // Item 188: toggle scope, then re-run the active query so the store re-filters
+  // structural hits against the (now changed) view-scope set.
+  const handleToggleScope = useCallback(() => {
+    toggleSearchScopedToView();
+    if (searchQuery.trim()) setSearchQuery(searchQuery);
+  }, [toggleSearchScopedToView, searchQuery, setSearchQuery]);
+
+  // Item 188: human label for what "this view" scopes to right now.
+  const scopeLabel =
+    viewMode === "trace"
+      ? "this trace"
+      : viewMode === "domain" && activeDomainId
+        ? "this domain"
+        : viewMode === "structural"
+          ? "this layer"
+          : "this view";
+  // Only meaningful when there is an actual subgraph to scope to.
+  const scopeAvailable =
+    viewMode === "trace" ||
+    (viewMode === "domain" && !!activeDomainId) ||
+    viewMode === "structural";
 
   const applyHistoryQuery = useCallback(
     (q: string) => {
@@ -223,6 +278,21 @@ export default function SearchBar() {
           {modeButton("semantic", t.search.semantic)}
           {modeButton("regex", "Regex")}
         </div>
+        {/* Item 188: scope search to the current view's subgraph */}
+        {scopeAvailable && (
+          <button
+            onClick={handleToggleScope}
+            className={`hidden sm:inline-flex items-center gap-1 text-[10px] px-1.5 py-1 rounded-lg border shrink-0 transition-colors ${
+              searchScopedToView
+                ? "bg-accent/15 border-accent/50 text-accent"
+                : "bg-elevated border-border-subtle text-text-muted hover:text-text-secondary"
+            }`}
+            title={`Limit results to ${scopeLabel}`}
+            aria-pressed={searchScopedToView}
+          >
+            {searchScopedToView ? "◎" : "○"} in {scopeLabel}
+          </button>
+        )}
         {hasQuery && (
           <span className="hidden md:inline text-xs text-text-muted shrink-0">
             {federated.length} {t.search.result}{federated.length !== 1 ? "s" : ""}{" "}

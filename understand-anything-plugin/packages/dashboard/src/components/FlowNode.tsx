@@ -14,6 +14,10 @@ export interface FlowNodeData extends Record<string, unknown> {
   dimmed?: boolean;
   /** Feature 93: this is the focused flow. */
   focused?: boolean;
+  /** Item 114: dimmed because it doesn't touch the active entity filter. */
+  entityDimmed?: boolean;
+  /** Item 117: entry-type accent color (http/cli/event/cron). */
+  entryTypeColor?: string;
 }
 
 export type FlowFlowNode = Node<FlowNodeData, "flow-node">;
@@ -34,7 +38,12 @@ function FlowNode({ data }: NodeProps<FlowFlowNode>) {
           : isSelected
             ? "border-accent bg-accent/10"
             : "border-border-medium bg-surface hover:border-accent/50"
-      } ${data.dimmed ? "opacity-25" : ""}`}
+      } ${data.dimmed || data.entityDimmed ? "opacity-25" : ""}`}
+      style={
+        data.entryTypeColor
+          ? { borderLeft: `3px solid ${data.entryTypeColor}` }
+          : undefined
+      }
       onClick={() => selectNode(data.flowId)}
       onDoubleClick={(e) => {
         e.stopPropagation();
