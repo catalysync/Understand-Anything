@@ -363,3 +363,468 @@ export function deadCodeSet(graph: KnowledgeGraph): Set<string> {
   }
   return dead;
 }
+
+// ---------------------------------------------------------------------------
+// Tests & coverage (items 39-41, 45). A `test` node "covers" a code node via a
+// `covers` (test→code) or `tested_by` (code→test) edge. We treat both directions
+// as the same relation so the analyzer can emit whichever is convenient.
+// ---------------------------------------------------------------------------
+
+/** Node types we paint with the tri-state coverage overlay (the "code" surface). */
+export const COVERAGE_TARGET_TYPES: ReadonlySet<NodeType> = CODE_TYPES;
+
+/** Edges that mean "test ↔ code under test", in either direction. */
+const COVERS_EDGE_TYPES: ReadonlySet<string> = new Set<string>(["covers", "tested_by"]);
+
+export type CoverageState = "covered" | "partial" | "uncovered";
+
+/**
+ * For every code node, the set of `test` node ids that cover it. A code node is
+ * "covered" when it has ≥1 covering test. Edges are matched in both directions:
+ *   covers:    source=test    → target=code
+ *   tested_by: source=code    → target=test
+ * but we tolerate the reverse too (defensive — the analyzer is being enriched).
+ */
+export function coveringTestsByCode(graph: KnowledgeGraph | null): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  if (!graph) return out;
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const add = (codeId: string, testId: string) => {
+    let s = out.get(codeId);
+    if (!s) {
+      s = new Set();
+      out.set(codeId, s);
+    }
+    s.add(testId);
+  };
+  for (const e of graph.edges) {
+    if (!COVERS_EDGE_TYPES.has(e.type)) continue;
+    const sn = byId.get(e.source);
+    const tn = byId.get(e.target);
+    if (!sn || !tn) continue;
+    // Identify which endpoint is the test and which is the code-under-test.
+    if (sn.type === "test" && CODE_TYPES.has(tn.type)) add(tn.id, sn.id);
+    else if (tn.type === "test" && CODE_TYPES.has(sn.type)) add(sn.id, tn.id);
+    else if (sn.type === "test") add(tn.id, sn.id); // test→anything
+    else if (tn.type === "test") add(sn.id, tn.id); // anything→test
+  }
+  return out;
+}
+
+/** The `test` nodes that cover a single code node (resolved GraphNodes). */
+export function coveringTestsForNode(graph: KnowledgeGraph | null, codeId: string): GraphNode[] {
+  if (!graph) return [];
+  const map = coveringTestsByCode(graph);
+  const ids = map.get(codeId);
+  if (!ids || ids.size === 0) return [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  return [...ids].map((id) => byId.get(id)).filter((n): n is GraphNode => !!n);
+}
+
+/** The code nodes a single `test` node covers (resolved GraphNodes). */
+export function codeUnderTest(graph: KnowledgeGraph | null, testId: string): GraphNode[] {
+  if (!graph) return [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const seen = new Set<string>();
+  const out: GraphNode[] = [];
+  for (const e of graph.edges) {
+    if (!COVERS_EDGE_TYPES.has(e.type)) continue;
+    let otherId: string | null = null;
+    if (e.source === testId) otherId = e.target;
+    else if (e.target === testId) otherId = e.source;
+    if (!otherId || seen.has(otherId)) continue;
+    const other = byId.get(otherId);
+    if (other && CODE_TYPES.has(other.type)) {
+      seen.add(otherId);
+      out.push(other);
+    }
+  }
+  return out;
+}
+
+/**
+ * Per-node coverage classification. Leaf code nodes are covered/uncovered (no
+ * "partial" — a single fn is binary). Folder/layer/file aggregate nodes get a
+ * partial state and a percentage from their descendants.
+ *
+ * `coverageStateForNode` returns the tri-state for a single node id; for an
+ * aggregate (file/module with children) it derives from contained code nodes.
+ */
+export interface CoverageInfo {
+  state: CoverageState;
+  /** 0..1 fraction of descendant code nodes that are covered (aggregate nodes). */
+  pct: number | null;
+  /** number of covering tests for a leaf node. */
+  testCount: number;
+}
+
+export function buildCoverageInfo(graph: KnowledgeGraph | null): Map<string, CoverageInfo> {
+  const info = new Map<string, CoverageInfo>();
+  if (!graph) return info;
+  const covering = coveringTestsByCode(graph);
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+
+  // children via `contains` (file→fn/class, module→file …).
+  const childrenOf = new Map<string, string[]>();
+  for (const e of graph.edges) {
+    if (e.type !== "contains") continue;
+    let list = childrenOf.get(e.source);
+    if (!list) {
+      list = [];
+      childrenOf.set(e.source, list);
+    }
+    list.push(e.target);
+  }
+
+  // Memoized descendant-coverage aggregation (covered / total code leaves).
+  const agg = new Map<string, { covered: number; total: number }>();
+  const visiting = new Set<string>();
+  function aggregate(id: string): { covered: number; total: number } {
+    const cached = agg.get(id);
+    if (cached) return cached;
+    if (visiting.has(id)) return { covered: 0, total: 0 };
+    visiting.add(id);
+    const node = byId.get(id);
+    let covered = 0;
+    let total = 0;
+    const kids = childrenOf.get(id) ?? [];
+    if (kids.length > 0) {
+      for (const k of kids) {
+        const sub = aggregate(k);
+        covered += sub.covered;
+        total += sub.total;
+      }
+    }
+    // A code node itself counts as a leaf unit when it has no code children.
+    if (node && CODE_TYPES.has(node.type) && kids.length === 0) {
+      total += 1;
+      if ((covering.get(id)?.size ?? 0) > 0) covered += 1;
+    }
+    const res = { covered, total };
+    agg.set(id, res);
+    visiting.delete(id);
+    return res;
+  }
+
+  for (const n of graph.nodes) {
+    const hasKids = (childrenOf.get(n.id)?.length ?? 0) > 0;
+    const testCount = covering.get(n.id)?.size ?? 0;
+    if (hasKids) {
+      const { covered, total } = aggregate(n.id);
+      if (total === 0) continue; // no code under it — skip, leave unpainted
+      const pct = covered / total;
+      const state: CoverageState =
+        pct >= 0.999 ? "covered" : pct <= 0.001 ? "uncovered" : "partial";
+      info.set(n.id, { state, pct, testCount });
+    } else if (CODE_TYPES.has(n.type)) {
+      info.set(n.id, {
+        state: testCount > 0 ? "covered" : "uncovered",
+        pct: testCount > 0 ? 1 : 0,
+        testCount,
+      });
+    }
+  }
+  return info;
+}
+
+/** True if the graph has ANY test→code coverage edge (gate for the overlay UI). */
+export function hasCoverageData(graph: KnowledgeGraph | null): boolean {
+  if (!graph) return false;
+  for (const e of graph.edges) if (COVERS_EDGE_TYPES.has(e.type)) return true;
+  return false;
+}
+
+/**
+ * Test-impact (item 45). Given a set of changed/selected code node ids, return
+ * the `test` nodes whose covered closure includes any of them — i.e. the tests
+ * to run. We follow reverse `calls`/`covers` so a test that covers a function
+ * which (transitively) calls a changed function is included.
+ */
+export function impactedTests(
+  graph: KnowledgeGraph | null,
+  changedIds: Iterable<string>,
+): GraphNode[] {
+  if (!graph) return [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  // Reverse call adjacency: callee → callers. A change to a callee impacts callers.
+  const callers = new Map<string, string[]>();
+  for (const e of graph.edges) {
+    if (e.type !== "calls") continue;
+    let list = callers.get(e.target);
+    if (!list) {
+      list = [];
+      callers.set(e.target, list);
+    }
+    list.push(e.source);
+  }
+  // BFS the reverse-call closure of the changed set.
+  const closure = new Set<string>();
+  const queue: string[] = [];
+  for (const id of changedIds) {
+    if (!closure.has(id)) {
+      closure.add(id);
+      queue.push(id);
+    }
+  }
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    for (const c of callers.get(cur) ?? []) {
+      if (!closure.has(c)) {
+        closure.add(c);
+        queue.push(c);
+      }
+    }
+  }
+  // Collect tests covering anything in the closure.
+  const covering = coveringTestsByCode(graph);
+  const testIds = new Set<string>();
+  for (const codeId of closure) {
+    for (const tid of covering.get(codeId) ?? []) testIds.add(tid);
+  }
+  return [...testIds].map((id) => byId.get(id)).filter((n): n is GraphNode => !!n);
+}
+
+// ---------------------------------------------------------------------------
+// Data / ERD (items 61-64, 69). Tables + columns + foreign keys as a graph.
+// ---------------------------------------------------------------------------
+
+const FK_EDGE_TYPES: ReadonlySet<string> = new Set<string>(["foreign_key", "inferred_fk"]);
+
+export interface ErdColumn {
+  node: GraphNode;
+  /** True when this column is a primary/foreign key (best-effort from attrs/tags). */
+  isKey: boolean;
+  isPk: boolean;
+  isFk: boolean;
+}
+
+export interface ErdTable {
+  node: GraphNode;
+  columns: ErdColumn[];
+}
+
+export interface ErdFk {
+  edge: GraphEdge;
+  /** Resolved table ids for the FK (best-effort — column endpoints map up to tables). */
+  fromTable: string | null;
+  toTable: string | null;
+  inferred: boolean;
+}
+
+function columnIsKey(n: GraphNode): { isKey: boolean; isPk: boolean; isFk: boolean } {
+  const tags = n.tags ?? [];
+  const a = n.attrs ?? {};
+  const isPk = tags.includes("pk") || tags.includes("primary_key") || a.primaryKey === true || a.pk === true;
+  const isFk = tags.includes("fk") || tags.includes("foreign_key") || a.foreignKey === true || a.fk === true ||
+    /_id$/.test(n.name);
+  return { isKey: isPk || isFk, isPk: !!isPk, isFk: !!isFk };
+}
+
+/**
+ * Build the ERD model: every `table` node with its `column` children (via
+ * `has_column`/`contains`), plus FK edges resolved to table endpoints. Returns
+ * empty arrays when there are no `table` nodes yet (sparse graph → empty state).
+ */
+export function buildErd(graph: KnowledgeGraph | null): { tables: ErdTable[]; fks: ErdFk[] } {
+  if (!graph) return { tables: [], fks: [] };
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const tables = graph.nodes.filter((n) => n.type === "table");
+  if (tables.length === 0) return { tables: [], fks: [] };
+
+  // column → owning table (via has_column or contains from a table; or column.attrs.table).
+  const colToTable = new Map<string, string>();
+  const colsByTable = new Map<string, GraphNode[]>();
+  for (const e of graph.edges) {
+    if (e.type !== "has_column" && e.type !== "contains") continue;
+    const src = byId.get(e.source);
+    const tgt = byId.get(e.target);
+    if (src?.type === "table" && tgt?.type === "column") {
+      colToTable.set(tgt.id, src.id);
+      let list = colsByTable.get(src.id);
+      if (!list) {
+        list = [];
+        colsByTable.set(src.id, list);
+      }
+      list.push(tgt);
+    }
+  }
+
+  const erdTables: ErdTable[] = tables.map((t) => {
+    const cols = (colsByTable.get(t.id) ?? []).map((c) => {
+      const k = columnIsKey(c);
+      return { node: c, ...k } as ErdColumn;
+    });
+    return { node: t, columns: cols };
+  });
+
+  // Resolve FK edges to table endpoints. Endpoints may be columns or tables.
+  const resolveTable = (id: string): string | null => {
+    const n = byId.get(id);
+    if (!n) return null;
+    if (n.type === "table") return n.id;
+    if (n.type === "column") return colToTable.get(n.id) ?? null;
+    return null;
+  };
+  const fks: ErdFk[] = [];
+  for (const e of graph.edges) {
+    if (!FK_EDGE_TYPES.has(e.type)) continue;
+    fks.push({
+      edge: e,
+      fromTable: resolveTable(e.source),
+      toTable: resolveTable(e.target),
+      inferred: e.type === "inferred_fk",
+    });
+  }
+  return { tables: erdTables, fks };
+}
+
+/** Code nodes that read/write a given column or table (via used_by / queries_table). */
+export function dataConsumers(graph: KnowledgeGraph | null, dataId: string): OpsRow[] {
+  if (!graph) return [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const DATA_USE_EDGES = new Set<string>(["used_by", "queries_table", "reads_table", "writes_table"]);
+  const out: OpsRow[] = [];
+  const seen = new Set<string>();
+  for (const e of graph.edges) {
+    if (!DATA_USE_EDGES.has(e.type)) continue;
+    const isSource = e.source === dataId;
+    const isTarget = e.target === dataId;
+    if (!isSource && !isTarget) continue;
+    const otherId = isSource ? e.target : e.source;
+    if (seen.has(otherId)) continue;
+    const other = byId.get(otherId);
+    if (!other || !CODE_TYPES.has(other.type)) continue;
+    seen.add(otherId);
+    out.push({ node: other, edge: e, outgoing: isSource });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Function data-footprint (items 71-73) + config/env map (item 86).
+// ---------------------------------------------------------------------------
+
+export interface DataFootprintRow {
+  node: GraphNode;
+  /** "read" | "write" | null (from the edge `access` field or edge type). */
+  access: "read" | "write" | null;
+  edgeType: string;
+}
+
+/** Tables/columns a code node queries, with read/write directionality. */
+export function dataFootprint(graph: KnowledgeGraph | null, codeId: string): DataFootprintRow[] {
+  if (!graph) return [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const Q = new Set<string>(["queries_table", "reads_table", "writes_table", "used_by"]);
+  const rows: DataFootprintRow[] = [];
+  const seen = new Set<string>();
+  for (const e of graph.edges) {
+    if (!Q.has(e.type)) continue;
+    let otherId: string | null = null;
+    if (e.source === codeId) otherId = e.target;
+    else if (e.target === codeId) otherId = e.source;
+    if (!otherId) continue;
+    const other = byId.get(otherId);
+    if (!other || (other.type !== "table" && other.type !== "column" && other.type !== "model" && other.type !== "query")) continue;
+    const key = `${e.type}:${otherId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const access: "read" | "write" | null =
+      e.access ?? (e.type === "reads_table" ? "read" : e.type === "writes_table" ? "write" : null);
+    rows.push({ node: other, access, edgeType: e.type });
+  }
+  return rows;
+}
+
+/** Env vars a code node reads (via reads_config). */
+export function envVarsForCode(graph: KnowledgeGraph | null, codeId: string): GraphNode[] {
+  if (!graph) return [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const seen = new Set<string>();
+  const out: GraphNode[] = [];
+  for (const e of graph.edges) {
+    if (e.type !== "reads_config") continue;
+    let otherId: string | null = null;
+    if (e.source === codeId) otherId = e.target;
+    else if (e.target === codeId) otherId = e.source;
+    if (!otherId || seen.has(otherId)) continue;
+    const other = byId.get(otherId);
+    if (other && (other.type === "env_var" || other.type === "feature_flag" || other.type === "secret")) {
+      seen.add(otherId);
+      out.push(other);
+    }
+  }
+  return out;
+}
+
+export interface ConfigEntry {
+  node: GraphNode;
+  required: boolean;
+  /** Code nodes that read this env var (reverse reads_config). */
+  consumers: GraphNode[];
+}
+
+/** True when an env_var node is marked required (no default). */
+function envVarRequired(n: GraphNode): boolean {
+  const a = n.attrs ?? {};
+  if (a.required === true) return true;
+  if (a.required === false) return false;
+  if ((n.tags ?? []).includes("required")) return true;
+  if ((n.tags ?? []).includes("optional")) return false;
+  // required-no-default heuristic: a default present → optional.
+  if (a.default !== undefined && a.default !== null && a.default !== "") return false;
+  return false;
+}
+
+/** Config/env map (item 86): every env_var node + required flag + consumers. */
+export function configMap(graph: KnowledgeGraph | null): ConfigEntry[] {
+  if (!graph) return [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const envVars = graph.nodes.filter(
+    (n) => n.type === "env_var" || n.type === "feature_flag" || n.type === "secret",
+  );
+  if (envVars.length === 0) return [];
+  const consumersByVar = new Map<string, GraphNode[]>();
+  const seen = new Map<string, Set<string>>();
+  for (const e of graph.edges) {
+    if (e.type !== "reads_config" && e.type !== "gated_by_flag" && e.type !== "secret_in_file") continue;
+    // env_var is one endpoint; the code node is the other.
+    const sn = byId.get(e.source);
+    const tn = byId.get(e.target);
+    if (!sn || !tn) continue;
+    let varNode: GraphNode | null = null;
+    let codeNode: GraphNode | null = null;
+    if (sn.type === "env_var" || sn.type === "feature_flag" || sn.type === "secret") {
+      varNode = sn;
+      codeNode = tn;
+    } else if (tn.type === "env_var" || tn.type === "feature_flag" || tn.type === "secret") {
+      varNode = tn;
+      codeNode = sn;
+    }
+    if (!varNode || !codeNode || !CODE_TYPES.has(codeNode.type)) continue;
+    let s = seen.get(varNode.id);
+    if (!s) {
+      s = new Set();
+      seen.set(varNode.id, s);
+    }
+    if (s.has(codeNode.id)) continue;
+    s.add(codeNode.id);
+    let list = consumersByVar.get(varNode.id);
+    if (!list) {
+      list = [];
+      consumersByVar.set(varNode.id, list);
+    }
+    list.push(codeNode);
+  }
+  return envVars
+    .map((n) => ({
+      node: n,
+      required: envVarRequired(n),
+      consumers: consumersByVar.get(n.id) ?? [],
+    }))
+    .sort((a, b) => {
+      // required-no-consumer first (most likely a problem), then alpha.
+      if (a.required !== b.required) return a.required ? -1 : 1;
+      return a.node.name.localeCompare(b.node.name);
+    });
+}

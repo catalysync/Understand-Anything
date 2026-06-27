@@ -6,6 +6,12 @@ import {
   opsLayerForNode,
   nodeTypeIcon,
   routeIdentity,
+  coveringTestsForNode,
+  codeUnderTest,
+  dataFootprint,
+  envVarsForCode,
+  impactedTests,
+  CODE_TYPES,
 } from "../utils/opsLayer";
 
 // Badge color classes keyed by NodeType — must be kept in sync with core NodeType union.
@@ -429,6 +435,173 @@ function OpsMetaBadges({ node }: { node: GraphNode }) {
   );
 }
 
+/**
+ * 300-series items 40-41 & 45: Tests section. For a code node it shows the
+ * covering-test count, a click-to-list of `test` nodes (each jumps), a
+ * "Go to tests" action, and a "Show test-impact" toggle (item 45). For a `test`
+ * node it shows a "Go to code under test" action listing the covered code.
+ */
+function TestsSection({ node, graph }: { node: GraphNode; graph: KnowledgeGraph }) {
+  const focusEntity = useDashboardStore((s) => s.focusEntity);
+  const setTestImpactRoot = useDashboardStore((s) => s.setTestImpactRoot);
+  const testImpactRootId = useDashboardStore((s) => s.testImpactRootId);
+  const [open, setOpen] = useState(false);
+
+  const isCode = CODE_TYPES.has(node.type);
+  const isTest = node.type === "test" || node.type === "suite";
+
+  const coveringTests = isCode ? coveringTestsForNode(graph, node.id) : [];
+  const covered = isTest ? codeUnderTest(graph, node.id) : [];
+  const impactCount = isCode ? impactedTests(graph, [node.id]).length : 0;
+
+  if (!isCode && !isTest) return null;
+  if (isCode && coveringTests.length === 0 && impactCount === 0) return null;
+  if (isTest && covered.length === 0) return null;
+
+  const impactActive = testImpactRootId === node.id;
+
+  return (
+    <div className="mb-4 space-y-2">
+      <h3 className="text-[11px] font-semibold text-node-test uppercase tracking-wider">
+        Tests
+      </h3>
+
+      {/* Code node: "N tests cover this" badge + jump-to-tests + impact */}
+      {isCode && (
+        <>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setOpen((v) => !v)}
+              className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border border-node-test/40 bg-node-test/10 text-node-test hover:bg-node-test/20 transition-colors"
+              title="List covering tests"
+            >
+              <span aria-hidden>✓</span>
+              {coveringTests.length} test{coveringTests.length === 1 ? "" : "s"} cover this
+              <span className="opacity-70">{open ? "▴" : "▾"}</span>
+            </button>
+            {impactCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setTestImpactRoot(impactActive ? null : node.id)}
+                className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors ${
+                  impactActive
+                    ? "border-[#d4a574]/60 bg-[#d4a574]/15 text-[#d4a574]"
+                    : "border-border-subtle text-text-muted hover:text-[#d4a574] hover:border-[#d4a574]/40"
+                }`}
+                title="Highlight the tests impacted by changing this node (item 45)"
+              >
+                {impactActive ? "✓ " : ""}Impact: {impactCount} test{impactCount === 1 ? "" : "s"}
+              </button>
+            )}
+          </div>
+          {open && coveringTests.length > 0 && (
+            <div className="space-y-1">
+              {coveringTests.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => focusEntity(t.id, { view: "structural" })}
+                  className="w-full flex items-center gap-2 text-xs bg-elevated rounded-lg px-3 py-1.5 border border-border-subtle hover:border-node-test/40 text-left transition-colors"
+                  title={`Jump to ${t.name}`}
+                >
+                  <span className="text-node-test shrink-0" aria-hidden>✓</span>
+                  <span className="text-text-primary truncate flex-1">{t.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Test node: jump to code under test */}
+      {isTest && covered.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">
+            Code under test ({covered.length})
+          </div>
+          {covered.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => focusEntity(c.id, { view: "structural" })}
+              className="w-full flex items-center gap-2 text-xs bg-elevated rounded-lg px-3 py-1.5 border border-border-subtle hover:border-accent/40 text-left transition-colors"
+              title={`Go to ${c.name}`}
+            >
+              <span className="shrink-0" aria-hidden>{nodeTypeIcon(c.type)}</span>
+              <span className="text-text-primary truncate flex-1">{c.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 300-series items 71-73: Data footprint. Lists the tables/columns a code node
+ * reads/writes (with read/write directionality) and the env vars it reads.
+ */
+function DataFootprintSection({ node, graph }: { node: GraphNode; graph: KnowledgeGraph }) {
+  const focusEntity = useDashboardStore((s) => s.focusEntity);
+  if (!CODE_TYPES.has(node.type)) return null;
+
+  const tables = dataFootprint(graph, node.id);
+  const envVars = envVarsForCode(graph, node.id);
+  if (tables.length === 0 && envVars.length === 0) return null;
+
+  return (
+    <div className="mb-4 space-y-2">
+      <h3 className="text-[11px] font-semibold text-node-table uppercase tracking-wider">
+        Data
+      </h3>
+      {tables.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">
+            Tables / columns ({tables.length})
+          </div>
+          {tables.map((row) => (
+            <button
+              key={`${row.edgeType}-${row.node.id}`}
+              type="button"
+              onClick={() => focusEntity(row.node.id, { view: "data" })}
+              className="w-full flex items-center gap-2 text-xs bg-elevated rounded-lg px-3 py-1.5 border border-border-subtle hover:border-node-table/40 text-left transition-colors"
+              title={`Open ${row.node.name} in the Data view`}
+            >
+              <span className="text-node-table shrink-0" aria-hidden>▤</span>
+              {row.access && (
+                <span className={`text-[8px] font-bold uppercase px-1 rounded shrink-0 ${row.access === "write" ? "text-[#c97070] bg-[#c97070]/15" : "text-node-function bg-node-function/15"}`}>
+                  {row.access === "write" ? "W" : "R"}
+                </span>
+              )}
+              <span className="text-text-primary truncate flex-1">{row.node.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {envVars.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">
+            Config / env ({envVars.length})
+          </div>
+          {envVars.map((v) => (
+            <button
+              key={v.id}
+              type="button"
+              onClick={() => focusEntity(v.id, { view: "structural" })}
+              className="w-full flex items-center gap-2 text-xs bg-elevated rounded-lg px-3 py-1.5 border border-border-subtle hover:border-node-config-ops/40 text-left transition-colors"
+              title={`Jump to ${v.name}`}
+            >
+              <span className="text-node-config-ops shrink-0" aria-hidden>⚙</span>
+              <span className="font-mono text-text-primary truncate flex-1">{v.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function NodeInfo() {
   const graph = useDashboardStore((s) => s.graph);
   const selectedNodeId = useDashboardStore((s) => s.selectedNodeId);
@@ -675,6 +848,13 @@ export default function NodeInfo() {
       {activeGraph && node && (node.type === "domain" || node.type === "flow" || node.type === "step") && (
         <DomainNodeDetails node={node} graph={activeGraph} />
       )}
+
+      {/* 300-series items 40-41 & 45: tests covering this node (or code under a
+          test) + test-impact toggle. Renders nothing when there's no coverage. */}
+      {activeGraph && node && <TestsSection node={node} graph={activeGraph} />}
+
+      {/* 300-series items 71-73: data footprint (tables read/written + env vars). */}
+      {activeGraph && node && <DataFootprintSection node={node} graph={activeGraph} />}
 
       {/* Keystone: cross-layer operations connections (used_by / handles_route /
           queries_table / raises / tested_by / reads_config …). Renders nothing

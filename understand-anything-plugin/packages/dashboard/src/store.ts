@@ -78,7 +78,7 @@ export type Complexity = "simple" | "moderate" | "complex";
 export type EdgeCategory = "structural" | "behavioral" | "data-flow" | "dependencies" | "semantic" | "infrastructure" | "domain" | "knowledge"
   // Operations layer (300-series)
   | "entrypoint" | "test" | "data-ops" | "error" | "observability" | "ownership" | "config";
-export type ViewMode = "structural" | "domain" | "knowledge" | "trace";
+export type ViewMode = "structural" | "domain" | "knowledge" | "trace" | "data";
 export type DetailLevel = "file" | "class";
 
 /** Structural-view layout engine: ELK layered (hierarchical) vs d3-force. */
@@ -434,6 +434,19 @@ interface DashboardStore {
   toggleDeadCodeOverlay: () => void;
   /** Clear all reachability overlays. */
   clearReachabilityOverlay: () => void;
+
+  // ── Tri-state coverage overlay (300-series items 39-45) ───────────────────
+  /** Paint code nodes covered(green)/partial(yellow)/uncovered(red). Persisted. */
+  coverageOverlay: boolean;
+  toggleCoverageOverlay: () => void;
+  /** Test-impact: when set, highlight the impacted-test closure of this node. */
+  testImpactRootId: string | null;
+  setTestImpactRoot: (id: string | null) => void;
+
+  // ── Data / ERD view (300-series items 61-64) ──────────────────────────────
+  /** Attribute visibility level for the ERD. Persisted. */
+  erdAttrLevel: "all" | "keys" | "names";
+  setErdAttrLevel: (level: "all" | "keys" | "names") => void;
 
   setGraph: (graph: KnowledgeGraph) => void;
   selectNode: (nodeId: string | null) => void;
@@ -1000,6 +1013,24 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   toggleDeadCodeOverlay: () =>
     set((s) => ({ deadCodeOverlay: !s.deadCodeOverlay, reachabilityRootId: null })),
   clearReachabilityOverlay: () => set({ reachabilityRootId: null, deadCodeOverlay: false }),
+
+  // ── Tri-state coverage overlay (300-series items 39-45) ───────────────────
+  coverageOverlay: readPersisted("ua-coverage-overlay-v1", ["on", "off"], "off") === "on",
+  toggleCoverageOverlay: () =>
+    set((s) => {
+      const next = !s.coverageOverlay;
+      persist("ua-coverage-overlay-v1", next ? "on" : "off");
+      return { coverageOverlay: next };
+    }),
+  testImpactRootId: null,
+  setTestImpactRoot: (id) => set({ testImpactRootId: id }),
+
+  // ── Data / ERD view (300-series items 61-64) ──────────────────────────────
+  erdAttrLevel: readPersisted("ua-erd-attr-level-v1", ["all", "keys", "names"], "all"),
+  setErdAttrLevel: (level) => {
+    persist("ua-erd-attr-level-v1", level);
+    set({ erdAttrLevel: level });
+  },
 
   setGraph: (graph) => {
     const searchEngine = new SearchEngine(graph.nodes);
@@ -1682,7 +1713,9 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
           ? "Domain flows"
           : mode === "trace"
             ? "Trace view"
-            : "Knowledge graph";
+            : mode === "data"
+              ? "Data / ERD view"
+              : "Knowledge graph";
     const base = {
       viewMode: mode,
       codeViewerOpen: false,
@@ -1733,6 +1766,8 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       set({ viewMode: "domain", selectedNodeId: nodeId });
     } else if (view === "knowledge") {
       set({ viewMode: "knowledge", selectedNodeId: nodeId });
+    } else if (view === "data") {
+      set({ viewMode: "data", selectedNodeId: nodeId });
     } else {
       // structural — navigate into the node's layer and select it.
       set({ viewMode: "structural" });

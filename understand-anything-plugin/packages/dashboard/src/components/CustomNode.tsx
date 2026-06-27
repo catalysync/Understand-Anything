@@ -149,7 +149,20 @@ export interface CustomNodeData extends Record<string, unknown> {
   lod?: "dot" | "name" | "full";
   /** Item 83: recolor the left bar by complexity (green→amber→red). */
   heat?: boolean;
+  /** 300-series item 39: tri-state coverage overlay state for this node. */
+  coverage?: "covered" | "partial" | "uncovered" | null;
+  /** 300-series item 40: covering-test count (drives the "N tests" badge). */
+  coverageTestCount?: number;
+  /** 300-series item 45: node is in the impacted-test highlight set. */
+  isTestImpacted?: boolean;
 }
+
+// 300-series item 39: tri-state coverage palette (green / amber / red).
+const coverageColors: Record<string, string> = {
+  covered: "#5a9e6f",
+  partial: "#d4a574",
+  uncovered: "#c97070",
+};
 
 export type CustomFlowNode = Node<CustomNodeData, "custom">;
 
@@ -158,9 +171,13 @@ function CustomNodeComponent({
   data,
 }: NodeProps<CustomFlowNode>) {
   const knownType = data.nodeType as NodeType;
-  const barColor = data.heat
-    ? complexityHeatColors[data.complexity] ?? complexityHeatColors.simple
-    : typeColors[knownType] ?? typeColors.file;
+  const coverageColor =
+    data.coverage != null ? coverageColors[data.coverage] : undefined;
+  const barColor = coverageColor
+    ? coverageColor
+    : data.heat
+      ? complexityHeatColors[data.complexity] ?? complexityHeatColors.simple
+      : typeColors[knownType] ?? typeColors.file;
   const textColor = typeTextColors[knownType] ?? typeTextColors.file;
   const complexityColor = complexityColors[data.complexity] ?? complexityColors.simple;
   const lod = data.lod ?? "full";
@@ -200,6 +217,11 @@ function CustomNodeComponent({
     extraClass += " opacity-20 pointer-events-auto";
   } else if (data.isNeighbor) {
     extraClass += " ring-1 ring-gold-dim/50";
+  }
+
+  // 300-series item 45: impacted-test highlight (amber pulse ring).
+  if (data.isTestImpacted) {
+    extraClass += " ring-2 ring-[#d4a574] animate-accent-pulse";
   }
 
   const name = data.label ?? "unnamed";
@@ -264,14 +286,22 @@ function CustomNodeComponent({
             <span className={`text-[9px] font-mono ${complexityColor}`}>
               {data.complexity}
             </span>
-            {data.tags?.includes("tested") && (
+            {data.coverage != null && (data.coverageTestCount ?? 0) > 0 ? (
+              <span
+                className="inline-flex items-center gap-0.5 text-[8px] font-bold px-1 py-0.5 rounded-full"
+                style={{ color: coverageColors[data.coverage], backgroundColor: `${coverageColors[data.coverage]}22` }}
+                title={`${data.coverageTestCount} test${data.coverageTestCount === 1 ? "" : "s"} cover this`}
+              >
+                ✓{data.coverageTestCount}
+              </span>
+            ) : data.tags?.includes("tested") ? (
               <span
                 className="inline-block w-1.5 h-1.5 rounded-full bg-node-function shadow-[0_0_4px_rgba(90,158,111,0.6)]"
                 role="img"
                 aria-label={t.customNode.tested}
                 title={t.customNode.hasTests}
               />
-            )}
+            ) : null}
           </div>
         </div>
 

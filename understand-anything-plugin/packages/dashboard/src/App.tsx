@@ -34,6 +34,7 @@ import { I18nProvider, useI18n } from "./contexts/I18nContext.tsx";
 // Lazy-load heavy / optional components so they ship in separate chunks.
 const CodeViewer = lazy(() => import("./components/CodeViewer"));
 const TraceView = lazy(() => import("./components/TraceView"));
+const DataView = lazy(() => import("./components/DataView"));
 const PathFinderModal = lazy(() => import("./components/PathFinderModal"));
 const KeyboardShortcutsHelp = lazy(
   () => import("./components/KeyboardShortcutsHelp"),
@@ -309,6 +310,8 @@ function DashboardContent({
   const toggleDeclutterLeaves = useDashboardStore((s) => s.toggleDeclutterLeaves);
   const complexityHeat = useDashboardStore((s) => s.complexityHeat);
   const toggleComplexityHeat = useDashboardStore((s) => s.toggleComplexityHeat);
+  const coverageOverlay = useDashboardStore((s) => s.coverageOverlay);
+  const toggleCoverageOverlay = useDashboardStore((s) => s.toggleCoverageOverlay);
   const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(readSidebarWidth);
   const resizingRef = useRef(false);
@@ -664,6 +667,19 @@ function DashboardContent({
                 >
                   Trace
                 </button>
+                {/* 300-series items 61-64: Data / ERD view */}
+                <button
+                  type="button"
+                  onClick={() => setViewMode("data")}
+                  title="Data / ERD — tables, columns and foreign keys"
+                  className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                    viewMode === "data"
+                      ? "bg-accent/20 text-accent"
+                      : "text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  Data
+                </button>
               </div>
             </>
           )}
@@ -676,7 +692,7 @@ function DashboardContent({
             {/* Item 197: "What changed" cross-view summary (shows only in diff mode). */}
             <WhatChangedPanel />
             {/* Detail level: file view (architecture) / class view (code structure) */}
-            {!isKnowledgeGraph && viewMode !== "domain" && (
+            {!isKnowledgeGraph && viewMode !== "domain" && viewMode !== "data" && (
               <>
                 <div className="w-px h-5 bg-border-subtle" />
                 <div className="flex items-center bg-elevated rounded-lg p-0.5">
@@ -790,6 +806,19 @@ function DashboardContent({
                   }`}
                 >
                   Heat
+                </button>
+                {/* 300-series item 39: tri-state coverage overlay */}
+                <button
+                  type="button"
+                  onClick={toggleCoverageOverlay}
+                  title="Coverage overlay — paint nodes covered (green) / partial (yellow) / uncovered (red)"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    coverageOverlay
+                      ? "border-[#5a9e6f]/50 bg-[#5a9e6f]/10 text-[#5a9e6f]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  Coverage
                 </button>
               </>
             )}
@@ -931,6 +960,10 @@ function DashboardContent({
           ) : viewMode === "trace" ? (
             <Suspense fallback={null}>
               <TraceView accessToken={accessToken} />
+            </Suspense>
+          ) : viewMode === "data" ? (
+            <Suspense fallback={null}>
+              <DataView />
             </Suspense>
           ) : viewMode === "knowledge" ? (
             <KnowledgeGraphView />

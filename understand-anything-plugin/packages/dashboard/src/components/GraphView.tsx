@@ -59,7 +59,7 @@ import {
 import { deriveContainers } from "../utils/containers";
 import type { DerivedContainer } from "../utils/containers";
 import { computeLayerStats } from "../utils/layerStats";
-import { reachableFrom, deadCodeSet } from "../utils/opsLayer";
+import { reachableFrom, deadCodeSet, buildCoverageInfo, impactedTests, hasCoverageData } from "../utils/opsLayer";
 
 const nodeTypes = {
   custom: CustomNode,
@@ -1148,6 +1148,9 @@ function useLayerDetailGraph() {
   // 300-series items 12-14: reachability / dead-code overlay.
   const reachabilityRootId = useDashboardStore((s) => s.reachabilityRootId);
   const deadCodeOverlay = useDashboardStore((s) => s.deadCodeOverlay);
+  // 300-series items 39-45: tri-state coverage overlay + test-impact highlight.
+  const coverageOverlay = useDashboardStore((s) => s.coverageOverlay);
+  const testImpactRootId = useDashboardStore((s) => s.testImpactRootId);
   const graph = useDashboardStore((s) => s.graph);
 
   const handleNodeSelect = useCallback(
@@ -1285,6 +1288,21 @@ function useLayerDetailGraph() {
     return null;
   }, [graph, reachabilityRootId, deadCodeOverlay]);
 
+  // 300-series items 39-40: tri-state coverage map (only computed when the
+  // overlay is on; empty when the graph has no coverage edges yet).
+  const coverageInfo = useMemo(
+    () => (coverageOverlay && graph ? buildCoverageInfo(graph) : null),
+    [coverageOverlay, graph],
+  );
+
+  // 300-series item 45: impacted-test highlight set for the selected node.
+  const impactedTestIds = useMemo(() => {
+    if (!graph || !testImpactRootId) return null;
+    const tests = impactedTests(graph, [testImpactRootId]);
+    if (tests.length === 0) return null;
+    return new Set(tests.map((t) => t.id));
+  }, [graph, testImpactRootId]);
+
   // Combine Stage 1 nodes with Stage 2 expanded children, then apply the
   // visual overlay (selection, search, tour) to every CustomFlowNode in
   // the combined set. Container nodes get their own overlay branch.
@@ -1358,6 +1376,12 @@ function useLayerDetailGraph() {
 
       const data = node.data as CustomFlowNode["data"];
 
+      // 300-series coverage + test-impact overlay state for this node.
+      const cov = coverageInfo?.get(node.id);
+      const coverage = cov ? cov.state : null;
+      const coverageTestCount = cov ? cov.testCount : 0;
+      const isTestImpacted = impactedTestIds?.has(node.id) ?? false;
+
       // Skip creating a new object if nothing visual changed
       if (
         data.isHighlighted === isHighlighted &&
@@ -1366,12 +1390,15 @@ function useLayerDetailGraph() {
         data.isTourHighlighted === isTourHighlighted &&
         data.isNeighbor === isNeighbor &&
         data.isSelectionFaded === isSelectionFaded &&
-        data.heat === complexityHeat
+        data.heat === complexityHeat &&
+        data.coverage === coverage &&
+        data.coverageTestCount === coverageTestCount &&
+        data.isTestImpacted === isTestImpacted
       ) {
         return node;
       }
 
-      return { ...node, data: { ...data, isHighlighted, searchScore, isSelected, isTourHighlighted, isNeighbor, isSelectionFaded, heat: complexityHeat } };
+      return { ...node, data: { ...data, isHighlighted, searchScore, isSelected, isTourHighlighted, isNeighbor, isSelectionFaded, heat: complexityHeat, coverage, coverageTestCount, isTestImpacted } };
     });
   }, [
     topo.nodes,
@@ -1386,6 +1413,8 @@ function useLayerDetailGraph() {
     focusContainerIds,
     selectionContainerIds,
     complexityHeat,
+    coverageInfo,
+    impactedTestIds,
   ]);
 
   // Replace aggregated edges incident to an expanded container with the
@@ -1490,6 +1519,9 @@ function useLayerDetailGraph() {
 
 function GraphViewInner() {
   const graph = useDashboardStore((s) => s.graph);
+  // 300-series item 39: coverage legend state (overlay flag + data presence).
+  const coverageOverlayOn = useDashboardStore((s) => s.coverageOverlay);
+  const graphHasCoverage = useMemo(() => hasCoverageData(graph), [graph]);
   const navigationLevel = useDashboardStore((s) => s.navigationLevel);
   const activeLayerId = useDashboardStore((s) => s.activeLayerId);
   const selectNode = useDashboardStore((s) => s.selectNode);
@@ -1808,6 +1840,32 @@ function GraphViewInner() {
         <SelectedNodeFitView />
         <LODController />
       </ReactFlow>
+      {/* 300-series item 39: tri-state coverage legend (shown when overlay on) */}
+      {coverageOverlayOn && (
+        <div className="absolute bottom-4 left-4 z-10 rounded-lg border border-border-subtle bg-surface/90 px-3 py-2 shadow-xl backdrop-blur-sm">
+          <div className="text-[9px] font-semibold uppercase tracking-wider text-text-muted mb-1.5">
+            Coverage
+          </div>
+          {graphHasCoverage ? (
+            <div className="flex flex-col gap-1">
+              {([
+                ["covered", "#5a9e6f", "Covered"],
+                ["partial", "#d4a574", "Partial"],
+                ["uncovered", "#c97070", "Uncovered"],
+              ] as const).map(([key, color, label]) => (
+                <div key={key} className="flex items-center gap-1.5 text-[10px] text-text-secondary">
+                  <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: color }} />
+                  {label}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-[10px] text-text-muted max-w-[160px]">
+              No coverage edges in the graph yet — enrich with <span className="font-mono">tested_by</span>/<span className="font-mono">covers</span>.
+            </div>
+          )}
+        </div>
+      )}
       {/* Item 88: filtered-to-nothing empty state */}
       {filteredToNothing && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
