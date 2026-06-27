@@ -304,7 +304,35 @@ The `batchImportData` values contain only resolved project-internal paths — ex
 - **Terraform files:** Create `provisions` edges from Terraform resource/module definitions to the infrastructure they create (e.g., database resources, VM instances).
 - **Routing configs (nginx, API gateway, ingress):** Create `routes` edges from routing configuration to the services they direct traffic to.
 
-Do NOT use edge types not listed in the tables above.
+Do NOT use edge types not listed in the tables above (the operations-layer types in the next section are an explicit ADDITION to this list).
+
+## Operations-layer extraction (language-agnostic)
+
+Beyond the structural nodes/edges above, ALSO emit **operations-layer** nodes and edges **when a file clearly contains them** — entrypoints, tests, data/DB access, errors, config/flags/secrets, and observability. These power the 300-series "where does the world come in · what's tested · where does the data go · what can fail" views.
+
+**Core principles:**
+- **Be language-agnostic.** Recognize the *concept*, not a specific framework. The same `endpoint`/`test`/`query`/`error_type` node applies whether the code is Go, Python, Rails, TS, Java, Rust, PHP, C#, etc. Detect the *pattern* (a route declaration, a test function, a SQL statement, a thrown error) regardless of the library that expresses it.
+- **Only emit when clearly present.** Do NOT speculate. If a file has no obvious entrypoint/test/query/error/config/telemetry, emit nothing extra — these are purely additive.
+- **Respect the existing output protocol and limits.** Operations-layer nodes/edges count toward the same `nodes ≤ 60` / `edges ≤ 120` per-part thresholds (Step B). Keep IDs prefixed by type (see ID table). Stay within `summary`/`tags`/`complexity` shape; use the optional `kind`, `httpMethod`, `path`, `severity`, `attrs` node fields and `ordinal`, `access`, `confidence` edge fields where useful.
+- **The `used_by` keystone — ALWAYS link back to code.** Whenever you create an operations-layer node, also emit a `used_by` edge from that node to the code node (`file:`/`function:`/`class:`) that defines, reads, writes, handles, or raises it. This single join is the highest-value output of this layer — it connects "the operations world" to "the exact line of code." Direction: `operations-node → code-node`, weight `0.7`.
+
+**Cross-language cheat-sheet** (recognize ANY equivalent, not just the examples):
+
+| Concept | Signals across languages/frameworks | Emit nodes | Emit edges |
+|---|---|---|---|
+| **Entrypoints / routes** | `@app.route`/`@app.get` (Flask/FastAPI), `router.GET`/`http.HandleFunc` (Go), `get '/x'` (Rails), `@GetMapping`/`@RequestMapping` (Spring), Express `app.get`, NestJS `@Get`, lambda `handler`, gRPC service methods | `endpoint` / `route` (set `kind`="http"/"grpc"/"lambda", `httpMethod`, `path`) | `handles_route` (route → handler fn), `exposes_api`, `used_by` |
+| **CLI commands** | cobra (Go), click/argparse (Python), clap (Rust), commander (JS), Thor (Ruby) | `command` (`kind`="cli") | `subcommand_of` (child cmd → parent cmd), `used_by` |
+| **Scheduled jobs** | cron expressions, `@Scheduled` (Spring), `sidekiq-cron`, Celery beat, k8s CronJob | `schedule` (`kind`="cron", `attrs.cron`) | `triggered_by`, `used_by` |
+| **Events / message bus** | Kafka `@KafkaListener`/producer, SQS/SNS, RabbitMQ, NATS, `publish`/`subscribe`, Rails ActiveJob | `event` / `topic` (use existing `topic` type) | `emits_event`, `consumes_event`, `publishes_to`, `subscribes_to`, `used_by` |
+| **Tests** | `func TestX` (Go), `describe`/`it` (Jest/Mocha), `def test_` (pytest/unittest), `@Test` (JUnit), `it '...'` (RSpec), `#[test]` (Rust) | `test` / `suite` | `covers` (test → symbol under test), `tested_by`, `asserts_on`, `uses_fixture`, `used_by` |
+| **Data / DB** | SQL string literals (SELECT/INSERT/UPDATE/DELETE), ORM models & queries — ActiveRecord, SQLAlchemy, GORM, Prisma, Hibernate, TypeORM, Ecto | `table`, `column`, `model`, `query`, `migration`, `transaction` | `queries_table` (set `access`:"read"/"write"), `reads_table`, `writes_table`, `maps_to_table`, `has_column`, `has_association`, `foreign_key`, `inferred_fk` (set `confidence`), `runs_in_loop`, `opens_transaction`, `migrates`, `used_by` |
+| **Errors** | try/catch, `raise`/`throw`, `if err != nil` (Go), `panic`/`recover` (Go), `fmt.Errorf("%w")`, `Result`/`?` (Rust), custom exception classes | `error_type` (set `severity`) | `raises` (fn → error_type), `handles`, `wraps`, `swallows` (empty/log-only catch), `recovers`, `error_path`, `used_by` |
+| **Config / flags / secrets** | env reads (`os.Getenv` Go, `process.env` JS, `os.environ` Python, `ENV[]` Ruby, `viper`), feature-flag SDKs (LaunchDarkly, Unleash, Flagsmith), inline secret literals / `*_KEY`/`*_TOKEN` | `env_var`, `feature_flag`, `secret`, `cache_key` | `reads_config`, `gated_by_flag`, `secret_in_file`, `caches`, `reads_cache`, `invalidates`, `used_by` |
+| **Observability** | `logger.<level>`/`log.Info`/`slog`, OpenTelemetry spans (`tracer.start`/`StartSpan`), metrics (`counter.inc()`, `histogram.record()`, Prometheus/Micrometer/StatsD) | `log_site`, `span_site`, `metric`, `alert` | `logs`, `instruments`, `enriches_span`, `emits_metric`, `alerts_on`, `used_by` |
+
+**Worked example (any language).** A Go file with `func GetUser(w, r) { ... db.Query("SELECT * FROM users WHERE id=?") ... if err != nil { return fmt.Errorf("getUser: %w", err) } }` registered via `r.GET("/users/:id", GetUser)` should emit: an `endpoint` node (`kind`:"http", `httpMethod`:"GET", `path`:"/users/:id") with `handles_route` → `function:...:GetUser` and `used_by` → it; a `table:...:users` node with `queries_table` (`access`:"read") from `GetUser` and `used_by`; an `error_type` node with `raises` from `GetUser` and `wraps`. The same shape applies to the Python/Rails/Java equivalents.
+
+**Operations-layer node IDs** follow the same `type:path:name` convention as the table below: `endpoint:src/api.go:/users/:id`, `route:...`, `command:...`, `test:src/x_test.go:TestGetUser`, `query:src/repo.go:select-users`, `error_type:src/api.go:NotFound`, `env_var:src/config.ts:DATABASE_URL`, `log_site:src/api.go:42`, `metric:src/api.go:orders_total`, etc. Normalize query identity by replacing literals with `$1`/`?` so one parameterized query = one node.
 
 ## Node Types and ID Conventions
 
@@ -324,7 +352,9 @@ You MUST use these exact prefixes for node IDs:
 | Schema | `schema:<relative-path>` | `schema:schema.graphql` |
 | Resource | `resource:<relative-path>` | `resource:main.tf` |
 
-**Scope restriction:** Only produce node types listed above. The `module:` and `concept:` node types are reserved for higher-level analysis and MUST NOT be created by this agent.
+**Operations-layer node IDs** (additive — see the "Operations-layer extraction" section above): `endpoint:`, `route:`, `command:`, `event:`, `schedule:`, `api:`, `test:`, `suite:`, `fixture:`, `finding:`, `table:`, `column:`, `model:`, `query:`, `transaction:`, `migration:`, `env_var:`, `feature_flag:`, `secret:`, `cache_key:`, `error_type:`, `log_site:`, `span_site:`, `metric:`, `alert:`, `owner:`, `doc:`, `payload_schema:`. Use the same `type:<relative-path>:<name>` shape.
+
+**Scope restriction:** Produce only the structural node types in the table above plus the operations-layer types just listed (emit the latter only when clearly present, per the cheat-sheet). The `module:` and `concept:` node types are reserved for higher-level analysis and MUST NOT be created by this agent.
 
 > **WARNING:** Node IDs MUST use the exact prefix formats shown above. Do NOT prefix IDs with the project name (e.g., `my-project:file:src/foo.ts` is WRONG). Do NOT use bare file paths without a type prefix (e.g., `src/foo.ts` is WRONG). Invalid IDs will be auto-corrected during assembly, which may cause unexpected edge rewiring.
 

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useDashboardStore } from "../store";
 import { useI18n } from "../contexts/I18nContext";
-import type { NodeType, EdgeType, KnowledgeGraph, GraphNode } from "@understand-anything/core/types";
+import type { NodeType, KnowledgeGraph, GraphNode } from "@understand-anything/core/types";
 
 // Badge color classes keyed by NodeType — must be kept in sync with core NodeType union.
 const typeBadgeColors: Record<NodeType, string> = {
@@ -26,6 +26,33 @@ const typeBadgeColors: Record<NodeType, string> = {
   topic: "text-node-topic border border-node-topic/30 bg-node-topic/10",
   claim: "text-node-claim border border-node-claim/30 bg-node-claim/10",
   source: "text-node-source border border-node-source/30 bg-node-source/10",
+  // ── Operations layer (300-series) ──────────────────────────────────────
+  route: "text-node-endpoint border border-node-endpoint/30 bg-node-endpoint/10",
+  command: "text-node-endpoint border border-node-endpoint/30 bg-node-endpoint/10",
+  event: "text-node-endpoint border border-node-endpoint/30 bg-node-endpoint/10",
+  schedule: "text-node-endpoint border border-node-endpoint/30 bg-node-endpoint/10",
+  api: "text-node-endpoint border border-node-endpoint/30 bg-node-endpoint/10",
+  column: "text-node-table border border-node-table/30 bg-node-table/10",
+  model: "text-node-table border border-node-table/30 bg-node-table/10",
+  query: "text-node-table border border-node-table/30 bg-node-table/10",
+  transaction: "text-node-table border border-node-table/30 bg-node-table/10",
+  migration: "text-node-table border border-node-table/30 bg-node-table/10",
+  cache_key: "text-node-table border border-node-table/30 bg-node-table/10",
+  payload_schema: "text-node-table border border-node-table/30 bg-node-table/10",
+  test: "text-node-test border border-node-test/30 bg-node-test/10",
+  suite: "text-node-test border border-node-test/30 bg-node-test/10",
+  fixture: "text-node-test border border-node-test/30 bg-node-test/10",
+  finding: "text-node-finding border border-node-finding/30 bg-node-finding/10",
+  error_type: "text-node-error border border-node-error/30 bg-node-error/10",
+  env_var: "text-node-config-ops border border-node-config-ops/30 bg-node-config-ops/10",
+  feature_flag: "text-node-config-ops border border-node-config-ops/30 bg-node-config-ops/10",
+  secret: "text-node-config-ops border border-node-config-ops/30 bg-node-config-ops/10",
+  log_site: "text-node-observability border border-node-observability/30 bg-node-observability/10",
+  span_site: "text-node-observability border border-node-observability/30 bg-node-observability/10",
+  metric: "text-node-observability border border-node-observability/30 bg-node-observability/10",
+  alert: "text-node-observability border border-node-observability/30 bg-node-observability/10",
+  owner: "text-node-owner border border-node-owner/30 bg-node-owner/10",
+  doc: "text-node-document border border-node-document/30 bg-node-document/10",
 };
 
 const complexityBadgeColors: Record<string, string> = {
@@ -35,7 +62,9 @@ const complexityBadgeColors: Record<string, string> = {
 };
 
 function getDirectionalLabel(edgeType: string, isSource: boolean, t: ReturnType<typeof useI18n>["t"]): string {
-  const labels = t.edgeLabels[edgeType as EdgeType];
+  // edgeLabels covers the structural/domain/knowledge edge types; operations-layer
+  // (300-series) edge types fall through to the humanized-name formatter below.
+  const labels = (t.edgeLabels as Record<string, { forward: string; backward: string }>)[edgeType];
   if (!labels) {
     const formatted = edgeType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
     return isSource ? formatted : `${formatted} (reverse)`;

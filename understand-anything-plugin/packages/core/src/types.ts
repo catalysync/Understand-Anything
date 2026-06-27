@@ -1,12 +1,37 @@
-// Node types (21 total: 5 code + 8 non-code + 3 domain + 5 knowledge)
+// Node types — code + non-code + domain + knowledge + operations-layer (300-series).
+// The operations-layer types describe entrypoints, tests, data, errors and
+// observability so the 300-series features work for ANY language/framework.
 export type NodeType =
   | "file" | "function" | "class" | "module" | "concept"
   | "config" | "document" | "service" | "table" | "endpoint"
   | "pipeline" | "schema" | "resource"
   | "domain" | "flow" | "step"
-  | "article" | "entity" | "topic" | "claim" | "source";
+  | "article" | "entity" | "topic" | "claim" | "source"
+  // Operations layer — entrypoints / API surface
+  // (`topic` for message buses reuses the existing knowledge `topic` type above)
+  | "route" | "command" | "event" | "schedule" | "api"
+  // Operations layer — tests & findings
+  | "test" | "suite" | "fixture" | "finding"
+  // Operations layer — data / DB
+  | "column" | "model" | "query" | "transaction" | "migration"
+  // Operations layer — config / flags / secrets / cache
+  | "env_var" | "feature_flag" | "secret" | "cache_key"
+  // Operations layer — errors
+  | "error_type"
+  // Operations layer — observability
+  | "log_site" | "span_site" | "metric" | "alert"
+  // Operations layer — ownership / docs / services / payloads
+  | "owner" | "doc" | "payload_schema";
 
-// Edge types (35 total in 8 categories: Structural, Behavioral, Data flow, Dependencies, Semantic, Infrastructure/Schema, Domain, Knowledge)
+// NOTE on "topic": the catalog lists a `topic` node-type for event/message
+// buses, but `topic` is already a KNOWLEDGE node-type above, so the operations
+// layer reuses it (additive — no duplicate union member needed). The analyzer
+// emits `event`/`topic` nodes for bus destinations.
+
+// Edge types — structural + behavioral + data + domain + knowledge +
+// operations-layer (300-series). The operations-layer edges bridge code nodes
+// to the entrypoint / test / data / error / observability nodes above; the
+// `used_by` keystone links every operations-layer node back to its code node.
 export type EdgeType =
   | "imports" | "exports" | "contains" | "inherits" | "implements"  // Structural
   | "calls" | "subscribes" | "publishes" | "middleware"              // Behavioral
@@ -16,7 +41,28 @@ export type EdgeType =
   | "deploys" | "serves" | "provisions" | "triggers"                // Infrastructure
   | "migrates" | "documents" | "routes" | "defines_schema"          // Schema/Data
   | "contains_flow" | "flow_step" | "cross_domain"                  // Domain
-  | "cites" | "contradicts" | "builds_on" | "exemplifies" | "categorized_under" | "authored_by"; // Knowledge
+  | "cites" | "contradicts" | "builds_on" | "exemplifies" | "categorized_under" | "authored_by" // Knowledge
+  // Operations layer — entrypoints / API surface
+  | "handles_route" | "exposes_api" | "provides_api" | "consumes_api"
+  | "emits_event" | "consumes_event" | "triggered_by" | "subcommand_of"
+  | "reachable_from" | "passes_through" | "short_circuits"
+  // Operations layer — tests & findings
+  | "covers" | "asserts_on" | "uses_fixture" | "temporal_coupling"
+  | "duplicates" | "flags_vuln" | "killed_by"
+  // Operations layer — data / DB
+  | "foreign_key" | "inferred_fk" | "maps_to_table" | "has_column"
+  | "has_association" | "queries_table" | "reads_table" | "writes_table"
+  | "used_by" | "runs_in_loop" | "opens_transaction" | "derives_from"
+  // Operations layer — config / flags / secrets / cache
+  | "reads_config" | "gated_by_flag" | "secret_in_file"
+  | "caches" | "reads_cache" | "invalidates"
+  | "publishes_to" | "subscribes_to"
+  // Operations layer — errors
+  | "raises" | "handles" | "wraps" | "swallows" | "recovers" | "error_path"
+  // Operations layer — observability
+  | "logs" | "instruments" | "enriches_span" | "emits_metric" | "alerts_on"
+  // Operations layer — ownership / docs
+  | "owns" | "owned_by" | "part_of";
 
 // Optional knowledge metadata for article/entity/topic/claim/source nodes
 export interface KnowledgeMeta {
@@ -48,6 +94,18 @@ export interface GraphNode {
   languageNotes?: string;
   domainMeta?: DomainMeta;
   knowledgeMeta?: KnowledgeMeta;
+  // ---- Operations-layer (300-series) optional metadata --------------------
+  // All optional + additive: present only on operations-layer node-types.
+  /** Sub-kind discriminator, e.g. endpoint kind "http"|"cli"|"cron"|"queue"|"grpc"|"lambda", finding kind "smell"|"vuln"|"mutant". */
+  kind?: string;
+  /** HTTP method for endpoint/route nodes (GET/POST/...). */
+  httpMethod?: string;
+  /** Route/path or normalized identity (e.g. http.route, db.collection.name). */
+  path?: string;
+  /** Severity for finding/error_type/alert nodes (e.g. "info"|"warning"|"error"|"critical"). */
+  severity?: string;
+  /** Generic bag for type-specific metadata (columns, flag keys, topic names, etc.). */
+  attrs?: Record<string, unknown>;
 }
 
 // GraphEdge with rich relationship modeling
@@ -58,6 +116,13 @@ export interface GraphEdge {
   direction: "forward" | "backward" | "bidirectional";
   description?: string;
   weight: number; // 0-1
+  // ---- Operations-layer (300-series) optional metadata --------------------
+  /** Ordering index for ordered edges (e.g. passes_through middleware pipeline). */
+  ordinal?: number;
+  /** Access mode for data edges (queries_table / used_by). */
+  access?: "read" | "write";
+  /** Confidence 0–1 for inferred edges (e.g. inferred_fk). */
+  confidence?: number;
 }
 
 // Layer (logical grouping)

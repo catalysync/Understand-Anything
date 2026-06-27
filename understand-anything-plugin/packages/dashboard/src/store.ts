@@ -65,9 +65,19 @@ export interface ContextChip {
   source?: string;
 }
 export type NavigationLevel = "overview" | "layer-detail";
-export type NodeType = "file" | "function" | "class" | "module" | "concept" | "config" | "document" | "service" | "table" | "endpoint" | "pipeline" | "schema" | "resource" | "domain" | "flow" | "step" | "article" | "entity" | "topic" | "claim" | "source";
+export type NodeType = "file" | "function" | "class" | "module" | "concept" | "config" | "document" | "service" | "table" | "endpoint" | "pipeline" | "schema" | "resource" | "domain" | "flow" | "step" | "article" | "entity" | "topic" | "claim" | "source"
+  // Operations layer (300-series): entrypoints, tests, data, errors, observability, ownership, config
+  | "route" | "command" | "event" | "schedule" | "api"
+  | "test" | "suite" | "fixture" | "finding"
+  | "column" | "model" | "query" | "transaction" | "migration"
+  | "env_var" | "feature_flag" | "secret" | "cache_key"
+  | "error_type"
+  | "log_site" | "span_site" | "metric" | "alert"
+  | "owner" | "doc" | "payload_schema";
 export type Complexity = "simple" | "moderate" | "complex";
-export type EdgeCategory = "structural" | "behavioral" | "data-flow" | "dependencies" | "semantic" | "infrastructure" | "domain" | "knowledge";
+export type EdgeCategory = "structural" | "behavioral" | "data-flow" | "dependencies" | "semantic" | "infrastructure" | "domain" | "knowledge"
+  // Operations layer (300-series)
+  | "entrypoint" | "test" | "data-ops" | "error" | "observability" | "ownership" | "config";
 export type ViewMode = "structural" | "domain" | "knowledge" | "trace";
 export type DetailLevel = "file" | "class";
 
@@ -103,9 +113,18 @@ export interface FilterState {
   edgeCategories: Set<EdgeCategory>;
 }
 
-export const ALL_NODE_TYPES: NodeType[] = ["file", "function", "class", "module", "concept", "config", "document", "service", "table", "endpoint", "pipeline", "schema", "resource", "domain", "flow", "step", "article", "entity", "topic", "claim", "source"];
+export const ALL_NODE_TYPES: NodeType[] = ["file", "function", "class", "module", "concept", "config", "document", "service", "table", "endpoint", "pipeline", "schema", "resource", "domain", "flow", "step", "article", "entity", "topic", "claim", "source",
+  // Operations layer (300-series)
+  "route", "command", "event", "schedule", "api",
+  "test", "suite", "fixture", "finding",
+  "column", "model", "query", "transaction", "migration",
+  "env_var", "feature_flag", "secret", "cache_key",
+  "error_type",
+  "log_site", "span_site", "metric", "alert",
+  "owner", "doc", "payload_schema"];
 export const ALL_COMPLEXITIES: Complexity[] = ["simple", "moderate", "complex"];
-export const ALL_EDGE_CATEGORIES: EdgeCategory[] = ["structural", "behavioral", "data-flow", "dependencies", "semantic", "infrastructure", "domain", "knowledge"];
+export const ALL_EDGE_CATEGORIES: EdgeCategory[] = ["structural", "behavioral", "data-flow", "dependencies", "semantic", "infrastructure", "domain", "knowledge",
+  "entrypoint", "test", "data-ops", "error", "observability", "ownership", "config"];
 
 export const EDGE_CATEGORY_MAP: Record<EdgeCategory, string[]> = {
   structural: ["imports", "exports", "contains", "inherits", "implements"],
@@ -116,6 +135,14 @@ export const EDGE_CATEGORY_MAP: Record<EdgeCategory, string[]> = {
   infrastructure: ["deploys", "serves", "provisions", "triggers", "migrates", "documents", "routes", "defines_schema"],
   domain: ["contains_flow", "flow_step", "cross_domain"],
   knowledge: ["cites", "contradicts", "builds_on", "exemplifies", "categorized_under", "authored_by"],
+  // Operations layer (300-series) — entrypoints, tests, data, errors, observability, ownership, config
+  entrypoint: ["handles_route", "exposes_api", "provides_api", "consumes_api", "emits_event", "consumes_event", "triggered_by", "subcommand_of", "reachable_from", "passes_through", "short_circuits", "publishes_to", "subscribes_to"],
+  test: ["covers", "asserts_on", "uses_fixture", "temporal_coupling", "duplicates", "flags_vuln", "killed_by"],
+  "data-ops": ["foreign_key", "inferred_fk", "maps_to_table", "has_column", "has_association", "queries_table", "reads_table", "writes_table", "used_by", "runs_in_loop", "opens_transaction", "derives_from"],
+  error: ["raises", "handles", "wraps", "swallows", "recovers", "error_path"],
+  observability: ["logs", "instruments", "enriches_span", "emits_metric", "alerts_on"],
+  ownership: ["owns", "owned_by", "part_of"],
+  config: ["reads_config", "gated_by_flag", "secret_in_file", "caches", "reads_cache", "invalidates"],
 };
 
 export const DOMAIN_EDGE_TYPES = EDGE_CATEGORY_MAP.domain;

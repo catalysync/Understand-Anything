@@ -51,6 +51,13 @@ export const PRESETS: ThemePreset[] = [
       "node-pipeline": "#fda4af",
       "node-schema": "#fcd34d",
       "node-resource": "#a5b4fc",
+      // Operations layer (300-series)
+      "node-test": "#6ee7a0",
+      "node-finding": "#f0a868",
+      "node-error": "#f08a98",
+      "node-config-ops": "#f0d264",
+      "node-observability": "#b9a0ec",
+      "node-owner": "#9aa6b4",
     },
   },
   {
@@ -80,6 +87,13 @@ export const PRESETS: ThemePreset[] = [
       "node-pipeline": "#fda4af",
       "node-schema": "#fcd34d",
       "node-resource": "#a5b4fc",
+      // Operations layer (300-series)
+      "node-test": "#6ee7a0",
+      "node-finding": "#f0a868",
+      "node-error": "#f08a98",
+      "node-config-ops": "#f0d264",
+      "node-observability": "#b9a0ec",
+      "node-owner": "#9aa6b4",
     },
   },
   {
@@ -109,6 +123,13 @@ export const PRESETS: ThemePreset[] = [
       "node-pipeline": "#fda4af",
       "node-schema": "#fcd34d",
       "node-resource": "#a5b4fc",
+      // Operations layer (300-series)
+      "node-test": "#6ee7a0",
+      "node-finding": "#f0a868",
+      "node-error": "#f08a98",
+      "node-config-ops": "#f0d264",
+      "node-observability": "#b9a0ec",
+      "node-owner": "#9aa6b4",
     },
   },
   {
@@ -138,6 +159,13 @@ export const PRESETS: ThemePreset[] = [
       "node-pipeline": "#fda4af",
       "node-schema": "#fcd34d",
       "node-resource": "#a5b4fc",
+      // Operations layer (300-series)
+      "node-test": "#6ee7a0",
+      "node-finding": "#f0a868",
+      "node-error": "#f08a98",
+      "node-config-ops": "#f0d264",
+      "node-observability": "#b9a0ec",
+      "node-owner": "#9aa6b4",
     },
   },
   {
@@ -167,6 +195,13 @@ export const PRESETS: ThemePreset[] = [
       "node-pipeline": "#fb7185",
       "node-schema": "#facc15",
       "node-resource": "#818cf8",
+      // Operations layer (300-series)
+      "node-test": "#22a06b",
+      "node-finding": "#d97a3a",
+      "node-error": "#d23f54",
+      "node-config-ops": "#c79a14",
+      "node-observability": "#7c5fce",
+      "node-owner": "#5f6b78",
     },
   },
   {
@@ -196,6 +231,13 @@ export const PRESETS: ThemePreset[] = [
       "node-pipeline": "#e45649",
       "node-schema": "#c18401",
       "node-resource": "#4078f2",
+      // Operations layer (300-series)
+      "node-test": "#50a14f",
+      "node-finding": "#c18401",
+      "node-error": "#e45649",
+      "node-config-ops": "#986801",
+      "node-observability": "#a626a4",
+      "node-owner": "#696c77",
     },
   },
 ];

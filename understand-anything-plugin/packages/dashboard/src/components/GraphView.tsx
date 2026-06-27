@@ -85,6 +85,25 @@ const NODE_TYPE_TO_CATEGORY: Record<NodeType, NodeCategory> = {
   table: "data", endpoint: "data", schema: "data",
   domain: "domain", flow: "domain", step: "domain",
   article: "knowledge", entity: "knowledge", topic: "knowledge", claim: "knowledge", source: "knowledge",
+  // ── Operations layer (300-series) ──────────────────────────────────────
+  // Folded into existing filter categories so the type-filter toggles stay
+  // additive. Semantic grouping (entrypoint/test/error/observability/...) is
+  // carried by the node colors (--color-node-*) instead.
+  // entrypoints / API surface → infra
+  route: "infra", command: "infra", event: "infra", schedule: "infra", api: "infra",
+  // tests & findings → code
+  test: "code", suite: "code", fixture: "code", finding: "code",
+  // data / DB → data
+  column: "data", model: "data", query: "data", transaction: "data", migration: "data",
+  cache_key: "data", payload_schema: "data",
+  // config / flags / secrets → config
+  env_var: "config", feature_flag: "config", secret: "config",
+  // errors → code
+  error_type: "code",
+  // observability → infra
+  log_site: "infra", span_site: "infra", metric: "infra", alert: "infra",
+  // ownership / docs → infra / docs
+  owner: "infra", doc: "docs",
 } as const;
 
 // ── Helper components that must live inside <ReactFlow> ────────────────

@@ -27,6 +27,40 @@ const typeColors: Record<NodeType, string> = {
   topic: "var(--color-node-topic)",
   claim: "var(--color-node-claim)",
   source: "var(--color-node-source)",
+  // ── Operations layer (300-series) — semantically grouped hues ──────────
+  // entrypoints → warm orange/amber (share the endpoint hue)
+  route: "var(--color-node-endpoint)",
+  command: "var(--color-node-endpoint)",
+  event: "var(--color-node-endpoint)",
+  schedule: "var(--color-node-endpoint)",
+  api: "var(--color-node-endpoint)",
+  // data → teal/cyan (share the table hue)
+  column: "var(--color-node-table)",
+  model: "var(--color-node-table)",
+  query: "var(--color-node-table)",
+  transaction: "var(--color-node-table)",
+  migration: "var(--color-node-table)",
+  cache_key: "var(--color-node-table)",
+  payload_schema: "var(--color-node-table)",
+  // tests/coverage → green (share the function hue)
+  test: "var(--color-node-test)",
+  suite: "var(--color-node-test)",
+  fixture: "var(--color-node-test)",
+  finding: "var(--color-node-finding)",
+  // errors → red/crimson
+  error_type: "var(--color-node-error)",
+  // config/flags/secrets → yellow/gold
+  env_var: "var(--color-node-config-ops)",
+  feature_flag: "var(--color-node-config-ops)",
+  secret: "var(--color-node-config-ops)",
+  // observability → violet
+  log_site: "var(--color-node-observability)",
+  span_site: "var(--color-node-observability)",
+  metric: "var(--color-node-observability)",
+  alert: "var(--color-node-observability)",
+  // ownership → slate; docs → document hue
+  owner: "var(--color-node-owner)",
+  doc: "var(--color-node-document)",
 };
 
 const typeTextColors: Record<NodeType, string> = {
@@ -51,6 +85,33 @@ const typeTextColors: Record<NodeType, string> = {
   topic: "text-node-topic",
   claim: "text-node-claim",
   source: "text-node-source",
+  // ── Operations layer (300-series) ──────────────────────────────────────
+  route: "text-node-endpoint",
+  command: "text-node-endpoint",
+  event: "text-node-endpoint",
+  schedule: "text-node-endpoint",
+  api: "text-node-endpoint",
+  column: "text-node-table",
+  model: "text-node-table",
+  query: "text-node-table",
+  transaction: "text-node-table",
+  migration: "text-node-table",
+  cache_key: "text-node-table",
+  payload_schema: "text-node-table",
+  test: "text-node-test",
+  suite: "text-node-test",
+  fixture: "text-node-test",
+  finding: "text-node-finding",
+  error_type: "text-node-error",
+  env_var: "text-node-config-ops",
+  feature_flag: "text-node-config-ops",
+  secret: "text-node-config-ops",
+  log_site: "text-node-observability",
+  span_site: "text-node-observability",
+  metric: "text-node-observability",
+  alert: "text-node-observability",
+  owner: "text-node-owner",
+  doc: "text-node-document",
 };
 
 const complexityColors: Record<string, string> = {

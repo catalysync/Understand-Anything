@@ -685,15 +685,15 @@ describe("Extended node/edge types", () => {
     }
   });
 
-  it("auto-fixes new node type aliases: container->service, doc->document, business_flow->flow, etc.", () => {
+  it("auto-fixes new node type aliases: container->service, business_flow->flow, etc.", () => {
+    // NOTE: `route`, `api`, `query`, `migration`, `doc` are now first-class
+    // operations-layer node-types (300-series) and are no longer aliased.
     const aliases: Record<string, string> = {
       container: "service",
-      doc: "document",
       business_flow: "flow",
-      route: "endpoint",
       setting: "config",
       infra: "resource",
-      migration: "table",
+      database: "table",
     };
     for (const [alias, canonical] of Object.entries(aliases)) {
       const graph = structuredClone(validGraph);
@@ -701,6 +701,20 @@ describe("Extended node/edge types", () => {
       const result = validateGraph(graph);
       expect(result.success).toBe(true);
       expect(result.data!.nodes[0].type).toBe(canonical);
+    }
+  });
+
+  it("validates operations-layer node types as first-class (route, migration, doc, test, error_type, etc.)", () => {
+    const opsTypes = ["route", "command", "event", "schedule", "api", "test", "suite",
+      "fixture", "finding", "column", "model", "query", "transaction", "migration",
+      "env_var", "feature_flag", "secret", "cache_key", "error_type", "log_site",
+      "span_site", "metric", "alert", "owner", "doc", "payload_schema"];
+    for (const type of opsTypes) {
+      const graph = structuredClone(validGraph);
+      (graph.nodes[0] as any).type = type;
+      const result = validateGraph(graph);
+      expect(result.success).toBe(true);
+      expect(result.data!.nodes[0].type).toBe(type);
     }
   });
 

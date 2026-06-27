@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// Edge types (35 values across 8 categories)
+// Edge types — code/domain/knowledge + operations-layer (300-series).
 export const EdgeTypeSchema = z.enum([
   "imports", "exports", "contains", "inherits", "implements",  // Structural
   "calls", "subscribes", "publishes", "middleware",             // Behavioral
@@ -11,6 +11,27 @@ export const EdgeTypeSchema = z.enum([
   "migrates", "documents", "routes", "defines_schema",         // Schema/Data
   "contains_flow", "flow_step", "cross_domain",                // Domain
   "cites", "contradicts", "builds_on", "exemplifies", "categorized_under", "authored_by", // Knowledge
+  // Operations layer — entrypoints / API surface
+  "handles_route", "exposes_api", "provides_api", "consumes_api",
+  "emits_event", "consumes_event", "triggered_by", "subcommand_of",
+  "reachable_from", "passes_through", "short_circuits",
+  // Operations layer — tests & findings
+  "covers", "asserts_on", "uses_fixture", "temporal_coupling",
+  "duplicates", "flags_vuln", "killed_by",
+  // Operations layer — data / DB
+  "foreign_key", "inferred_fk", "maps_to_table", "has_column",
+  "has_association", "queries_table", "reads_table", "writes_table",
+  "used_by", "runs_in_loop", "opens_transaction", "derives_from",
+  // Operations layer — config / flags / secrets / cache
+  "reads_config", "gated_by_flag", "secret_in_file",
+  "caches", "reads_cache", "invalidates",
+  "publishes_to", "subscribes_to",
+  // Operations layer — errors
+  "raises", "handles", "wraps", "swallows", "recovers", "error_path",
+  // Operations layer — observability
+  "logs", "instruments", "enriches_span", "emits_metric", "alerts_on",
+  // Operations layer — ownership / docs
+  "owns", "owned_by", "part_of",
 ]);
 
 // Aliases that LLMs commonly generate instead of canonical node types
@@ -27,14 +48,14 @@ export const NODE_TYPE_ALIASES: Record<string, string> = {
   container: "service",
   deployment: "service",
   pod: "service",
-  doc: "document",
+  // NOTE: `doc` is now a first-class operations-layer node-type (co-located
+  // docs/runbooks) and is no longer aliased to `document`.
   readme: "document",
   docs: "document",
   job: "pipeline",
   ci: "pipeline",
-  route: "endpoint",
-  api: "endpoint",
-  query: "endpoint",
+  // NOTE: `route`, `api`, `query`, `migration` are now first-class operations-layer
+  // node-types — they are intentionally NOT aliased to endpoint/table anymore.
   mutation: "endpoint",
   setting: "config",
   env: "config",
@@ -42,7 +63,6 @@ export const NODE_TYPE_ALIASES: Record<string, string> = {
   infra: "resource",
   infrastructure: "resource",
   terraform: "resource",
-  migration: "table",
   database: "table",
   db: "table",
   view: "table",
@@ -373,6 +393,14 @@ export const GraphNodeSchema = z.object({
     "pipeline", "schema", "resource",
     "domain", "flow", "step",
     "article", "entity", "topic", "claim", "source",
+    // Operations layer (300-series)
+    "route", "command", "event", "schedule", "api",
+    "test", "suite", "fixture", "finding",
+    "column", "model", "query", "transaction", "migration",
+    "env_var", "feature_flag", "secret", "cache_key",
+    "error_type",
+    "log_site", "span_site", "metric", "alert",
+    "owner", "doc", "payload_schema",
   ]),
   name: z.string(),
   filePath: z.string().optional(),
@@ -383,6 +411,12 @@ export const GraphNodeSchema = z.object({
   languageNotes: z.string().optional(),
   domainMeta: DomainMetaSchema.optional(),
   knowledgeMeta: KnowledgeMetaSchema.optional(),
+  // Operations-layer optional metadata (additive; .passthrough also keeps unknown keys)
+  kind: z.string().optional(),
+  httpMethod: z.string().optional(),
+  path: z.string().optional(),
+  severity: z.string().optional(),
+  attrs: z.record(z.string(), z.unknown()).optional(),
 }).passthrough();
 
 export const GraphEdgeSchema = z.object({
@@ -392,7 +426,11 @@ export const GraphEdgeSchema = z.object({
   direction: z.enum(["forward", "backward", "bidirectional"]),
   description: z.string().optional(),
   weight: z.number().min(0).max(1),
-});
+  // Operations-layer optional metadata (additive)
+  ordinal: z.number().optional(),
+  access: z.enum(["read", "write"]).optional(),
+  confidence: z.number().min(0).max(1).optional(),
+}).passthrough();
 
 export const LayerSchema = z.object({
   id: z.string(),

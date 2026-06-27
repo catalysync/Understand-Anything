@@ -45,6 +45,14 @@
   --color-node-claim: #6fb07a;
   --color-node-source: #8a8a8a;
 
+  /* Operations-layer node types (300-series), semantically grouped */
+  --color-node-test: #5a9e6f;          /* tests/coverage → green */
+  --color-node-finding: #d98c5f;       /* findings → warm amber */
+  --color-node-error: #d35d6e;         /* errors → red/crimson */
+  --color-node-config-ops: #e0c054;    /* config/flags/secrets → yellow/gold */
+  --color-node-observability: #a78bda; /* logs/spans/metrics/alerts → violet */
+  --color-node-owner: #8c98a6;         /* ownership → slate */
+
   /* Diff */
   --color-diff-changed: #e05252;
   --color-diff-affected: #d4a030;
