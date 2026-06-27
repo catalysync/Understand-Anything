@@ -12,10 +12,20 @@ import type { ColorDimension } from "./components/traceColor";
 import {
   type OnboardingGoal,
   type LearningState,
+  type CurriculumTrack,
   EMPTY_LEARNING,
   loadLearning,
   saveLearning,
 } from "./utils/learningPersist";
+import {
+  type FlashcardReviews,
+  type VisitSnapshot,
+  gradeCard,
+  loadFlashcardReviews,
+  saveFlashcardReviews,
+  loadVisitSnapshot,
+  saveVisitSnapshot,
+} from "./utils/teachPersist";
 import {
   type AppSettings,
   type DestinationsState,
@@ -103,6 +113,24 @@ export interface DomainStepRef {
 }
 
 export type Persona = "non-technical" | "junior" | "experienced";
+
+/** Item 172: the diff between the current graph and the last-visit snapshot. */
+export interface VisitRecap {
+  /** First-ever visit — no prior snapshot existed (suppresses the card). */
+  firstVisit: boolean;
+  /** Node ids present now but absent at last visit. */
+  addedNodeIds: string[];
+  /** Node ids present at last visit but gone now. */
+  removedNodeIds: string[];
+  /** Node ids whose attrs.lastCommitAt changed since last visit. */
+  changedNodeIds: string[];
+  /** Layer name → count of added/changed nodes in it (for the headline). */
+  layerCounts: { layerName: string; count: number }[];
+  /** A stable signature of this recap (used to remember dismissal). */
+  signature: string;
+  /** When the previous snapshot was taken (epoch ms), 0 if none. */
+  lastVisitAt: number;
+}
 /** Wave-4 feature 37b: answer-detail level for claude -p explanations. */
 export type TraceLevel = "beginner" | "intermediate" | "expert";
 /** Wave-4 feature 39: an @-mention context chip (a hop or file) Claude can see. */
@@ -795,6 +823,20 @@ interface DashboardStore {
   /** Item 161: explicitly flag a checklist milestone (domain-flow read). */
   markChecklist: (key: "tookTour" | "didTrace" | "readDomainFlow") => void;
 
+  // ---- 200-series teaching long-tail (items 154/157/163/172) ------------
+  /** Item 154: toggle a curriculum module's completed state. */
+  toggleModuleComplete: (moduleId: string) => void;
+  /** Item 157: set the active role-based curriculum track. */
+  setCurriculumTrack: (track: CurriculumTrack) => void;
+  /** Item 163: flashcard spaced-review state (per project, localStorage). */
+  flashcardReviews: FlashcardReviews;
+  /** Item 163: grade a flashcard ("got it" = correct, "again" = wrong). */
+  gradeFlashcard: (cardId: string, correct: boolean) => void;
+  /** Item 172: the recap diff vs the last-visit snapshot (computed once on graph load). */
+  visitRecap: VisitRecap | null;
+  /** Item 172: dismiss the "what changed" recap card. */
+  dismissRecap: () => void;
+
   // ---- Wave-4: converse-with-Claude state -------------------------------
   /** Feature 38: persisted free-text trace rules (workspace.rules). */
   setRules: (rules: string) => void;
@@ -1011,6 +1053,86 @@ function layerResetIfChanged(
     // layer and would otherwise re-collide with a same-id container in
     // the new layer for the duration of the 1.2s timer.
     pendingFocusContainer: null,
+  };
+}
+
+/** Item 172: snapshot the current graph's node-ids + last-commit timestamps. */
+function snapshotGraph(graph: KnowledgeGraph): VisitSnapshot {
+  const commitAt: Record<string, string> = {};
+  for (const n of graph.nodes) {
+    const ts = n.attrs?.lastCommitAt;
+    if (typeof ts === "string") commitAt[n.id] = ts;
+  }
+  return {
+    takenAt: Date.now(),
+    nodeIds: graph.nodes.map((n) => n.id).sort(),
+    commitAt,
+  };
+}
+
+/**
+ * Item 172: diff the current graph against the last-visit snapshot. Returns a
+ * recap of added / removed / changed nodes, grouped by layer for the headline.
+ * `firstVisit` is true when there was no prior snapshot (the caller suppresses
+ * the card in that case).
+ */
+function computeVisitRecap(
+  graph: KnowledgeGraph | null,
+  prev: VisitSnapshot | null,
+): VisitRecap | null {
+  if (!graph) return null;
+  if (!prev) {
+    return {
+      firstVisit: true,
+      addedNodeIds: [],
+      removedNodeIds: [],
+      changedNodeIds: [],
+      layerCounts: [],
+      signature: "first",
+      lastVisitAt: 0,
+    };
+  }
+  const prevIds = new Set(prev.nodeIds);
+  const curIds = new Set(graph.nodes.map((n) => n.id));
+  const added: string[] = [];
+  const changed: string[] = [];
+  for (const n of graph.nodes) {
+    if (!prevIds.has(n.id)) {
+      added.push(n.id);
+      continue;
+    }
+    const ts = n.attrs?.lastCommitAt;
+    if (
+      typeof ts === "string" &&
+      prev.commitAt[n.id] &&
+      prev.commitAt[n.id] !== ts
+    ) {
+      changed.push(n.id);
+    }
+  }
+  const removed = prev.nodeIds.filter((id) => !curIds.has(id));
+
+  // Group added + changed by layer for a friendly headline.
+  const touched = new Set([...added, ...changed]);
+  const layerCount = new Map<string, number>();
+  for (const layer of graph.layers) {
+    let c = 0;
+    for (const nid of layer.nodeIds) if (touched.has(nid)) c++;
+    if (c > 0) layerCount.set(layer.name, c);
+  }
+  const layerCounts = Array.from(layerCount.entries())
+    .map(([layerName, count]) => ({ layerName, count }))
+    .sort((a, b) => b.count - a.count);
+
+  const signature = `${prev.takenAt}:${added.length}:${removed.length}:${changed.length}`;
+  return {
+    firstVisit: false,
+    addedNodeIds: added,
+    removedNodeIds: removed,
+    changedNodeIds: changed,
+    layerCounts,
+    signature,
+    lastVisitAt: prev.takenAt,
   };
 }
 
@@ -2099,6 +2221,8 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   // ---- Onboarding / teaching state (items 131-165) ----------------------
   learning: { ...EMPTY_LEARNING },
   learningLoaded: false,
+  flashcardReviews: {},
+  visitRecap: null,
 
   loadLearning: (projectKey) => {
     learningProjectKey = projectKey || "default";
@@ -2113,9 +2237,22 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     const archRules =
       persistedRules ??
       (get().graph ? deriveDefaultRules(get().graph!) : get().archRules);
+    // Item 172: compute the "what changed since I was last here" recap by
+    // diffing the current graph against the persisted last-visit snapshot, then
+    // write a fresh snapshot for next time.
+    const hydratedLearning = loadLearning(learningProjectKey);
+    const visitRecap = computeVisitRecap(
+      get().graph,
+      loadVisitSnapshot(learningProjectKey),
+    );
+    if (get().graph) {
+      saveVisitSnapshot(learningProjectKey, snapshotGraph(get().graph!));
+    }
     set({
-      learning: loadLearning(learningProjectKey),
+      learning: hydratedLearning,
       learningLoaded: true,
+      flashcardReviews: loadFlashcardReviews(learningProjectKey),
+      visitRecap,
       settings,
       destinations,
       archRules,
@@ -2167,6 +2304,46 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       const learning = { ...s.learning, [key]: true };
       saveLearning(learningProjectKey, learning);
       return { learning };
+    }),
+
+  // ---- 200-series teaching long-tail (items 154/157/163/172) ------------
+  toggleModuleComplete: (moduleId) =>
+    set((s) => {
+      const done = new Set(s.learning.completedModules);
+      if (done.has(moduleId)) done.delete(moduleId);
+      else done.add(moduleId);
+      const learning = { ...s.learning, completedModules: Array.from(done) };
+      saveLearning(learningProjectKey, learning);
+      return { learning };
+    }),
+
+  setCurriculumTrack: (track) =>
+    set((s) => {
+      if (s.learning.curriculumTrack === track) return {};
+      const learning = { ...s.learning, curriculumTrack: track };
+      saveLearning(learningProjectKey, learning);
+      return { learning };
+    }),
+
+  gradeFlashcard: (cardId, correct) =>
+    set((s) => {
+      const next = {
+        ...s.flashcardReviews,
+        [cardId]: gradeCard(s.flashcardReviews[cardId], correct),
+      };
+      saveFlashcardReviews(learningProjectKey, next);
+      return { flashcardReviews: next };
+    }),
+
+  dismissRecap: () =>
+    set((s) => {
+      if (!s.visitRecap) return {};
+      const learning = {
+        ...s.learning,
+        recapDismissedFor: s.visitRecap.signature,
+      };
+      saveLearning(learningProjectKey, learning);
+      return { learning, visitRecap: null };
     }),
 
   // ---- Wave-4: converse-with-Claude state -------------------------------

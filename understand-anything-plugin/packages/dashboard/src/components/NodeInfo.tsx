@@ -20,6 +20,7 @@ import {
   swallowedErrorsFor,
   CODE_TYPES,
 } from "../utils/opsLayer";
+import JargonText from "./JargonText";
 
 // Badge color classes keyed by NodeType — must be kept in sync with core NodeType union.
 const typeBadgeColors: Record<NodeType, string> = {
@@ -1008,7 +1009,8 @@ export default function NodeInfo() {
       </div>
 
       <p className="text-sm text-text-secondary mb-4 leading-relaxed">
-        {node.summary}
+        {/* Item 167: dotted-underline glossary/domain terms for hover-to-define. */}
+        <JargonText text={node.summary} />
       </p>
 
       {/* Operations-layer metadata (method · path · kind · severity) */}

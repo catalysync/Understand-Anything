@@ -21,6 +21,7 @@ import StartHereSpotlight from "./components/StartHereSpotlight";
 import ResumeBanner from "./components/ResumeBanner";
 import LanguageAxisToggle from "./components/LanguageAxisToggle";
 import WhatChangedPanel from "./components/WhatChangedPanel";
+import RecapCard from "./components/RecapCard";
 import ViewState from "./components/ViewState";
 import MobileLayout from "./components/MobileLayout";
 import { useIsMobile } from "./hooks/useIsMobile";
@@ -42,6 +43,9 @@ const KeyboardShortcutsHelp = lazy(
 const OnboardingOverlay = lazy(() => import("./components/OnboardingOverlay"));
 const SymbolPalette = lazy(() => import("./components/SymbolPalette"));
 const SettingsModal = lazy(() => import("./components/SettingsModal"));
+// 200-series teaching long-tail (items 154/155/157/163/168/170/172).
+const TeachPanel = lazy(() => import("./components/TeachPanel"));
+const HelpDrawer = lazy(() => import("./components/HelpDrawer"));
 
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
 const SESSION_TOKEN_KEY = "understand-anything-token";
@@ -343,6 +347,9 @@ function DashboardContent({
   const c4Level = useDashboardStore((s) => s.c4Level);
   const setC4Level = useDashboardStore((s) => s.setC4Level);
   const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
+  // 200-series: teaching hub (154/155/157/163/168) + context help drawer (170).
+  const [teachOpen, setTeachOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(readSidebarWidth);
   const resizingRef = useRef(false);
   const [showOnboarding, setShowOnboarding] = useState(shouldShowOnboarding);
@@ -1151,7 +1158,34 @@ function DashboardContent({
             </svg>
             <span className="hidden md:inline">{t.common.path}</span>
           </button>
+          {/* 200-series: teaching hub (curriculum / order / flashcards / acronyms). */}
+          <button
+            onClick={() => setTeachOpen(true)}
+            className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg text-sm bg-elevated text-text-secondary hover:text-text-primary transition-colors"
+            title="Learn this codebase — curriculum, flashcards, jargon"
+            data-testid="open-teach"
+          >
+            <span aria-hidden>🎓</span>
+            <span className="hidden md:inline">Learn</span>
+          </button>
           <ThemePicker />
+          {/* Item 170: context-sensitive help drawer (content changes by view). */}
+          <button
+            onClick={() => setHelpOpen(true)}
+            className="text-text-muted hover:text-accent transition-colors"
+            title="Context help for this view"
+            data-testid="open-help-drawer"
+            aria-label="Open context help"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+              />
+            </svg>
+          </button>
           {/* Item 200b: Settings modal entry point. */}
           <button
             onClick={() => setSettingsModalOpen(true)}
@@ -1197,6 +1231,9 @@ function DashboardContent({
 
       {/* Item 136: "Resume where you left off" tour banner. */}
       <ResumeBanner />
+
+      {/* Item 172: "What changed since I was last here?" recap card. */}
+      <RecapCard />
 
       {/* Validation warning banner */}
       {allIssues.length > 0 && !loadError && (
@@ -1333,6 +1370,23 @@ function DashboardContent({
       <Suspense fallback={null}>
         <SettingsModal />
       </Suspense>
+
+      {/* 200-series teaching hub (154/155/157/163/168) — lazy, mounted when open. */}
+      {teachOpen && (
+        <Suspense fallback={null}>
+          <TeachPanel
+            accessToken={accessToken}
+            onClose={() => setTeachOpen(false)}
+          />
+        </Suspense>
+      )}
+
+      {/* Item 170: context-sensitive help drawer — lazy, mounted when open. */}
+      {helpOpen && (
+        <Suspense fallback={null}>
+          <HelpDrawer onClose={() => setHelpOpen(false)} />
+        </Suspense>
+      )}
 
       {/* K3: shared node context menu (Trace · Explain · Show-in-domain · …). */}
       <JumpActions />

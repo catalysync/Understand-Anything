@@ -13,6 +13,15 @@ export type OnboardingGoal =
   | "role"
   | "exploring";
 
+/** 200-series item 157: preset role-based curriculum tracks. */
+export type CurriculumTrack =
+  | "all"
+  | "frontend"
+  | "backend"
+  | "data"
+  | "devops"
+  | "pm";
+
 export interface LearningState {
   onboardingGoal: OnboardingGoal | null;
   /** Last tour step the user reached (0-based). */
@@ -33,6 +42,13 @@ export interface LearningState {
   didTrace: boolean;
   /** Did the user open a domain flow? (checklist) */
   readDomainFlow: boolean;
+  // ---- 200-series teaching long-tail (items 154/157/172) ----------------
+  /** Item 154: curriculum module ids the user has marked complete. */
+  completedModules: string[];
+  /** Item 157: the active role-based curriculum track. */
+  curriculumTrack: CurriculumTrack;
+  /** Item 172: the user has dismissed the "what changed" recap for this snapshot. */
+  recapDismissedFor: string | null;
 }
 
 export const EMPTY_LEARNING: LearningState = {
@@ -46,6 +62,9 @@ export const EMPTY_LEARNING: LearningState = {
   tookTour: false,
   didTrace: false,
   readDomainFlow: false,
+  completedModules: [],
+  curriculumTrack: "all",
+  recapDismissedFor: null,
 };
 
 const KEY_PREFIX = "ua-learning-v1";
