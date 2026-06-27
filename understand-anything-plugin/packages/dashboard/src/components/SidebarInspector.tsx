@@ -21,10 +21,13 @@ import FileExplorer from "./FileExplorer";
 const LearnPanel = lazy(() => import("./LearnPanel"));
 const FrontDoorPanel = lazy(() => import("./FrontDoorPanel"));
 const ConfigMapPanel = lazy(() => import("./ConfigMapPanel"));
+const FeatureFlagPanel = lazy(() => import("./FeatureFlagPanel"));
+const StatusCodePanel = lazy(() => import("./StatusCodePanel"));
+const TestStoryPanel = lazy(() => import("./TestStoryPanel"));
 
-type Tab = "overview" | "files" | "doors" | "config" | "saved";
+type Tab = "overview" | "files" | "doors" | "config" | "flags" | "status" | "tests" | "saved";
 const TAB_KEY = "ua-sidebar-tab-v1";
-const ALL_TABS: Tab[] = ["overview", "files", "doors", "config", "saved"];
+const ALL_TABS: Tab[] = ["overview", "files", "doors", "config", "flags", "status", "tests", "saved"];
 
 function readTab(): Tab {
   if (typeof window === "undefined") return "overview";
@@ -339,19 +342,22 @@ export default function SidebarInspector() {
     files: t.sidebar.files,
     doors: "Doors",
     config: "Config",
+    flags: "Flags",
+    status: "Status",
+    tests: "Tests",
     saved: "Saved",
   };
 
   return (
     <div className="h-full flex flex-col min-h-0">
       {/* Tab strip */}
-      <div className="flex items-center gap-1 p-2 border-b border-border-subtle bg-surface shrink-0">
+      <div className="flex flex-wrap items-center gap-1 p-2 border-b border-border-subtle bg-surface shrink-0">
         {ALL_TABS.map((tb) => (
           <button
             key={tb}
             type="button"
             onClick={() => setTabPersisted(tb)}
-            className={`flex-1 px-2 py-1.5 rounded-md text-[11px] font-semibold uppercase tracking-wider transition-colors ${
+            className={`flex-1 basis-[18%] px-1.5 py-1.5 rounded-md text-[10px] font-semibold uppercase tracking-wider transition-colors ${
               tab === tb
                 ? "bg-accent/15 text-accent"
                 : "text-text-muted hover:text-text-primary hover:bg-elevated"
@@ -373,6 +379,18 @@ export default function SidebarInspector() {
         ) : tab === "config" ? (
           <Suspense fallback={null}>
             <ConfigMapPanel />
+          </Suspense>
+        ) : tab === "flags" ? (
+          <Suspense fallback={null}>
+            <FeatureFlagPanel />
+          </Suspense>
+        ) : tab === "status" ? (
+          <Suspense fallback={null}>
+            <StatusCodePanel />
+          </Suspense>
+        ) : tab === "tests" ? (
+          <Suspense fallback={null}>
+            <TestStoryPanel />
           </Suspense>
         ) : tab === "saved" ? (
           <SavedTab />

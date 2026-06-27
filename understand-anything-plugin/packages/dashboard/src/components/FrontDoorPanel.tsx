@@ -15,17 +15,20 @@ import {
   routeMap,
   nodeTypeIcon,
   allEntrypointIds,
+  scheduleCatalog,
+  commandTree,
   type EntrypointEntry,
+  type CommandTreeNode,
 } from "../utils/opsLayer";
 
-type DoorView = "index" | "api" | "reach";
+type DoorView = "index" | "api" | "jobs" | "reach";
 const DOOR_VIEW_KEY = "ua-frontdoor-view-v1";
 
 function readDoorView(): DoorView {
   if (typeof window === "undefined") return "index";
   try {
     const v = window.localStorage.getItem(DOOR_VIEW_KEY);
-    if (v === "index" || v === "api" || v === "reach") return v;
+    if (v === "index" || v === "api" || v === "jobs" || v === "reach") return v;
   } catch { /* ignore */ }
   return "index";
 }
@@ -420,6 +423,151 @@ function ReachView() {
   );
 }
 
+/** A command-tree branch (item 5), rendered recursively with indentation. */
+function CommandBranch({ node }: { node: CommandTreeNode }) {
+  const focusEntity = useDashboardStore((s) => s.focusEntity);
+  const startTraceAt = useDashboardStore((s) => s.startTraceAt);
+  const target = node.handler ?? node.node;
+  return (
+    <div style={{ marginLeft: node.depth > 0 ? 12 : 0 }}>
+      <div className="text-xs bg-elevated rounded-lg px-2.5 py-1.5 border border-border-subtle flex items-center gap-2 group">
+        <span className="shrink-0" aria-hidden>{node.children.length > 0 ? "▸" : "⌨"}</span>
+        <button
+          type="button"
+          onClick={() => focusEntity(target.id)}
+          className="flex-1 min-w-0 text-left text-text-primary truncate hover:text-accent transition-colors"
+          title={node.handler ? `Focus handler: ${node.handler.name}` : node.node.name}
+        >
+          <span className="font-mono">{node.node.name}</span>
+          {node.handler && (
+            <span className="text-text-muted ml-1.5">→ {node.handler.name}</span>
+          )}
+        </button>
+        {node.children.length === 0 && (
+          <button
+            type="button"
+            onClick={() => startTraceAt(target.id)}
+            className="shrink-0 opacity-0 group-hover:opacity-100 text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-accent/30 text-accent hover:text-accent-bright transition-all"
+            title="Trace from here"
+          >
+            ▶
+          </button>
+        )}
+      </div>
+      {node.children.length > 0 && (
+        <div className="mt-1 space-y-1 border-l border-border-subtle/50 pl-1">
+          {node.children.map((c) => (
+            <CommandBranch key={c.node.id} node={c} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Jobs view: 300-series item 7 (schedule/cron catalog) + item 5 (CLI command
+ * tree). Both sections empty-state independently — schedules/commands are
+ * enriched in parallel (and the hangar CLI is outside the indexed scope, so the
+ * command tree is likely empty — that's fine).
+ */
+function JobsView() {
+  const graph = useDashboardStore((s) => s.graph);
+  const focusEntity = useDashboardStore((s) => s.focusEntity);
+  const startTraceAt = useDashboardStore((s) => s.startTraceAt);
+
+  const schedules = useMemo(() => scheduleCatalog(graph), [graph]);
+  const commands = useMemo(() => commandTree(graph), [graph]);
+
+  if (schedules.length === 0 && commands.length === 0) {
+    return (
+      <div className="px-4 py-6 text-[11px] text-text-muted leading-relaxed">
+        No scheduled jobs or CLI commands indexed yet — once the graph is enriched
+        with <span className="font-mono">schedule</span> /{" "}
+        <span className="font-mono">command</span> nodes, cron cadences and the
+        command/subcommand tree will appear here.
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-4 py-3 space-y-5">
+      {/* Item 7 — Scheduled */}
+      <div>
+        <h3 className="text-[11px] font-semibold text-accent uppercase tracking-wider mb-2 flex items-center gap-1.5">
+          <span aria-hidden>⏱</span>
+          Scheduled
+          <span className="text-text-muted font-mono normal-case">({schedules.length})</span>
+        </h3>
+        {schedules.length === 0 ? (
+          <div className="text-[11px] text-text-muted px-1">No scheduled jobs found.</div>
+        ) : (
+          <div className="space-y-1">
+            {schedules.map((s) => {
+              const target = s.handler ?? s.node;
+              return (
+                <div
+                  key={s.node.id}
+                  className="text-xs bg-elevated rounded-lg px-2.5 py-1.5 border border-border-subtle flex items-center gap-2 group"
+                >
+                  <span className="shrink-0" aria-hidden>⏱</span>
+                  <button
+                    type="button"
+                    onClick={() => focusEntity(target.id)}
+                    className="flex-1 min-w-0 text-left text-text-primary truncate hover:text-accent transition-colors"
+                    title={s.handler ? `Focus handler: ${s.handler.name}` : s.node.summary || s.node.name}
+                  >
+                    <span className="truncate">{s.node.name}</span>
+                    {s.handler && (
+                      <span className="text-text-muted ml-1.5">→ {s.handler.name}</span>
+                    )}
+                  </button>
+                  {s.cadence && (
+                    <span
+                      className="shrink-0 font-mono text-[9px] text-node-config-ops bg-surface px-1.5 py-0.5 rounded"
+                      title="Cadence"
+                    >
+                      {s.cadence}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => startTraceAt(target.id)}
+                    className="shrink-0 opacity-0 group-hover:opacity-100 text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-accent/30 text-accent hover:text-accent-bright transition-all"
+                    title="Trace from here"
+                  >
+                    ▶
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Item 5 — Commands */}
+      <div>
+        <h3 className="text-[11px] font-semibold text-accent uppercase tracking-wider mb-2 flex items-center gap-1.5">
+          <span aria-hidden>⌨</span>
+          Commands
+          <span className="text-text-muted font-mono normal-case">({commands.length} root{commands.length === 1 ? "" : "s"})</span>
+        </h3>
+        {commands.length === 0 ? (
+          <div className="text-[11px] text-text-muted px-1">
+            No CLI commands indexed (likely outside the analyzed scope).
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {commands.map((c) => (
+              <CommandBranch key={c.node.id} node={c} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function FrontDoorPanel() {
   const [view, setView] = useState<DoorView>(readDoorView);
   const setViewPersisted = (v: DoorView) => {
@@ -430,6 +578,7 @@ export default function FrontDoorPanel() {
   const tabs: { id: DoorView; label: string }[] = [
     { id: "index", label: "Index" },
     { id: "api", label: "API map" },
+    { id: "jobs", label: "Jobs" },
     { id: "reach", label: "Reach" },
   ];
 
@@ -452,7 +601,7 @@ export default function FrontDoorPanel() {
         ))}
       </div>
       <div className="flex-1 min-h-0 overflow-auto">
-        {view === "index" ? <IndexView /> : view === "api" ? <ApiMapView /> : <ReachView />}
+        {view === "index" ? <IndexView /> : view === "api" ? <ApiMapView /> : view === "jobs" ? <JobsView /> : <ReachView />}
       </div>
     </div>
   );

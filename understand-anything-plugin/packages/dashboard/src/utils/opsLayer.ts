@@ -1419,3 +1419,516 @@ export function symbolChildren(graph: KnowledgeGraph | null, codeId: string): Sy
   }
   return out;
 }
+
+// ===========================================================================
+// FINAL OPS-FEATURE WAVE (300-series items 88, 7, 5, 98, 60).
+// Feature-flag map · Schedule/cron catalog · CLI command tree ·
+// HTTP status→handler map · Test-story linear execution view.
+// Every selector is pure + defensive: absent enrichment → empty result so the
+// UIs render clean empty-states (feature_flag/schedule are enriched in parallel).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Item 88 — Feature-flag → code map + dead-flag detection.
+// A `feature_flag` node gates code via `gated_by_flag` edges (flag↔code, either
+// direction). We surface each flag's consumer code nodes (its reference sites),
+// the reference count, and a "ready for removal" badge when ref-count is 0 or 1.
+// ---------------------------------------------------------------------------
+
+const FLAG_EDGE_TYPES: ReadonlySet<string> = new Set<string>(["gated_by_flag"]);
+
+export interface FeatureFlagEntry {
+  node: GraphNode;
+  /** Code nodes gated by this flag (reverse `gated_by_flag`). */
+  consumers: GraphNode[];
+  /** Number of distinct consumer sites. */
+  refCount: number;
+  /** True when the flag gates 0 or 1 site → candidate for removal. */
+  readyForRemoval: boolean;
+}
+
+/** True if the graph has ANY feature-flag enrichment (gate for the UI). */
+export function hasFeatureFlags(graph: KnowledgeGraph | null): boolean {
+  if (!graph) return false;
+  for (const n of graph.nodes) if (n.type === "feature_flag") return true;
+  return false;
+}
+
+/**
+ * Item 88. Every `feature_flag` node with its gated consumer code nodes (via
+ * `gated_by_flag`, either direction), the reference count, and a removal flag.
+ * Sorted ready-for-removal first (likely dead flags), then by ref-count desc.
+ * Returns [] when there are no feature_flag nodes yet (empty-state).
+ */
+export function featureFlagMap(graph: KnowledgeGraph | null): FeatureFlagEntry[] {
+  if (!graph) return [];
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const flags = graph.nodes.filter((n) => n.type === "feature_flag");
+  if (flags.length === 0) return [];
+
+  const consumersByFlag = new Map<string, GraphNode[]>();
+  const seen = new Map<string, Set<string>>();
+  for (const e of graph.edges) {
+    if (!FLAG_EDGE_TYPES.has(e.type)) continue;
+    const sn = byId.get(e.source);
+    const tn = byId.get(e.target);
+    if (!sn || !tn) continue;
+    let flagNode: GraphNode | null = null;
+    let codeNode: GraphNode | null = null;
+    if (sn.type === "feature_flag") { flagNode = sn; codeNode = tn; }
+    else if (tn.type === "feature_flag") { flagNode = tn; codeNode = sn; }
+    if (!flagNode || !codeNode || !CODE_TYPES.has(codeNode.type)) continue;
+    let s = seen.get(flagNode.id);
+    if (!s) { s = new Set(); seen.set(flagNode.id, s); }
+    if (s.has(codeNode.id)) continue;
+    s.add(codeNode.id);
+    let list = consumersByFlag.get(flagNode.id);
+    if (!list) { list = []; consumersByFlag.set(flagNode.id, list); }
+    list.push(codeNode);
+  }
+
+  return flags
+    .map((node) => {
+      const consumers = consumersByFlag.get(node.id) ?? [];
+      const refCount = consumers.length;
+      return { node, consumers, refCount, readyForRemoval: refCount <= 1 };
+    })
+    .sort((a, b) => {
+      if (a.readyForRemoval !== b.readyForRemoval) return a.readyForRemoval ? -1 : 1;
+      if (a.refCount !== b.refCount) return a.refCount - b.refCount;
+      return a.node.name.localeCompare(b.node.name);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Item 7 — Schedule / cron catalog. Every `schedule` node with its cadence
+// (from attrs/summary) and the target handler it `triggers` (or `used_by`).
+// ---------------------------------------------------------------------------
+
+export interface ScheduleEntry {
+  node: GraphNode;
+  /** Human cadence string (cron expr / interval), best-effort. */
+  cadence: string | null;
+  /** Resolved handler code node (via triggers / used_by / triggered_by). */
+  handler: GraphNode | null;
+}
+
+/** Best-effort cadence string for a schedule node (cron / interval). */
+export function scheduleCadence(n: GraphNode): string | null {
+  const a = n.attrs ?? {};
+  const fromAttr =
+    (typeof a.cron === "string" && a.cron) ||
+    (typeof a.cadence === "string" && a.cadence) ||
+    (typeof a.schedule === "string" && a.schedule) ||
+    (typeof a.interval === "string" && a.interval) ||
+    (typeof a.every === "string" && a.every) ||
+    null;
+  if (fromAttr) return fromAttr;
+  // A 5/6-field cron expression embedded in the summary.
+  if (n.summary) {
+    const m = n.summary.match(/(?:^|\s)((?:[\d*/,-]+\s+){4,5}[\d*/,-]+)(?:\s|$)/);
+    if (m) return m[1].trim();
+    const every = n.summary.match(/every\s+[\w\s]+?(?=[.,;]|$)/i);
+    if (every) return every[0].trim();
+  }
+  return null;
+}
+
+/** Resolve the handler code node a schedule triggers. */
+function scheduleHandler(graph: KnowledgeGraph, scheduleId: string): GraphNode | null {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const TRIGGER_EDGES = ["triggers", "triggered_by", "used_by", "handles_route", "exposes_api"];
+  for (const pref of TRIGGER_EDGES) {
+    for (const e of graph.edges) {
+      if (e.type !== pref) continue;
+      if (e.source === scheduleId) {
+        const t = byId.get(e.target);
+        if (t && CODE_TYPES.has(t.type)) return t;
+      }
+      if (e.target === scheduleId) {
+        const s = byId.get(e.source);
+        if (s && CODE_TYPES.has(s.type)) return s;
+      }
+    }
+  }
+  return null;
+}
+
+/** True if the graph has ANY schedule node (gate for the UI). */
+export function hasSchedules(graph: KnowledgeGraph | null): boolean {
+  if (!graph) return false;
+  for (const n of graph.nodes) if (n.type === "schedule") return true;
+  return false;
+}
+
+/** Item 7. Every `schedule` node + cadence + target handler. [] when none. */
+export function scheduleCatalog(graph: KnowledgeGraph | null): ScheduleEntry[] {
+  if (!graph) return [];
+  const schedules = graph.nodes.filter((n) => n.type === "schedule");
+  if (schedules.length === 0) return [];
+  return schedules
+    .map((node) => ({
+      node,
+      cadence: scheduleCadence(node),
+      handler: scheduleHandler(graph, node.id),
+    }))
+    .sort((a, b) => a.node.name.localeCompare(b.node.name));
+}
+
+// ---------------------------------------------------------------------------
+// Item 5 — CLI command tree. `command` nodes nested via `subcommand_of`
+// (child→parent), falling back to dotted/space name nesting. Leaves → handler.
+// ---------------------------------------------------------------------------
+
+export interface CommandTreeNode {
+  node: GraphNode;
+  children: CommandTreeNode[];
+  /** Resolved handler code node (for leaves). */
+  handler: GraphNode | null;
+  depth: number;
+}
+
+/** True if the graph has ANY command node (gate for the UI). */
+export function hasCommands(graph: KnowledgeGraph | null): boolean {
+  if (!graph) return false;
+  for (const n of graph.nodes) if (n.type === "command") return true;
+  return false;
+}
+
+/** Resolve the handler code node a command runs (used_by / handles_route). */
+function commandHandler(graph: KnowledgeGraph, commandId: string): GraphNode | null {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const EDGES = ["used_by", "handles_route", "exposes_api", "triggers", "triggered_by"];
+  for (const pref of EDGES) {
+    for (const e of graph.edges) {
+      if (e.type !== pref) continue;
+      if (e.source === commandId) {
+        const t = byId.get(e.target);
+        if (t && CODE_TYPES.has(t.type)) return t;
+      }
+      if (e.target === commandId) {
+        const s = byId.get(e.source);
+        if (s && CODE_TYPES.has(s.type)) return s;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Item 5. Build the command/subcommand forest. Parent links come from
+ * `subcommand_of` (source=child → target=parent) when present; otherwise we
+ * infer nesting from dotted/space-separated names (`db migrate` is a child of
+ * `db`). Returns root command nodes (each with nested children). [] when none.
+ */
+export function commandTree(graph: KnowledgeGraph | null): CommandTreeNode[] {
+  if (!graph) return [];
+  const commands = graph.nodes.filter((n) => n.type === "command");
+  if (commands.length === 0) return [];
+  const byId = new Map(commands.map((n) => [n.id, n] as const));
+
+  // Explicit parent links from subcommand_of (child → parent).
+  const parentOf = new Map<string, string>();
+  for (const e of graph.edges) {
+    if (e.type !== "subcommand_of") continue;
+    if (byId.has(e.source) && byId.has(e.target)) parentOf.set(e.source, e.target);
+  }
+
+  // Name-based fallback: longest matching command-name prefix is the parent.
+  const splitName = (n: GraphNode): string[] =>
+    n.name.trim().split(/[\s.:]+/).filter(Boolean);
+  if (parentOf.size === 0) {
+    const byName = new Map<string, GraphNode>();
+    for (const c of commands) byName.set(splitName(c).join(" "), c);
+    for (const c of commands) {
+      const parts = splitName(c);
+      for (let k = parts.length - 1; k >= 1; k--) {
+        const candidate = byName.get(parts.slice(0, k).join(" "));
+        if (candidate && candidate.id !== c.id) { parentOf.set(c.id, candidate.id); break; }
+      }
+    }
+  }
+
+  const childrenOf = new Map<string, GraphNode[]>();
+  for (const c of commands) {
+    const p = parentOf.get(c.id);
+    if (p) {
+      let l = childrenOf.get(p);
+      if (!l) { l = []; childrenOf.set(p, l); }
+      l.push(c);
+    }
+  }
+
+  const build = (node: GraphNode, depth: number, seen: Set<string>): CommandTreeNode => {
+    seen.add(node.id);
+    const kids = (childrenOf.get(node.id) ?? [])
+      .filter((k) => !seen.has(k.id))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((k) => build(k, depth + 1, seen));
+    return {
+      node,
+      children: kids,
+      handler: kids.length === 0 ? commandHandler(graph, node.id) : null,
+      depth,
+    };
+  };
+
+  const seen = new Set<string>();
+  const roots = commands
+    .filter((c) => !parentOf.has(c.id))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((c) => build(c, 0, seen));
+  // Any commands left unvisited (cycles in name inference) become roots too.
+  for (const c of commands) if (!seen.has(c.id)) roots.push(build(c, 0, seen));
+  return roots;
+}
+
+// ---------------------------------------------------------------------------
+// Item 98 — HTTP status-code → handler map. Detect status-emitting code nodes
+// from their summary/source/name (c.JSON(5xx, res.status(404), errs.CodeXxx,
+// error_type names) and group by status class (2xx/4xx/5xx). Pure heuristic;
+// degrades gracefully when sparse.
+// ---------------------------------------------------------------------------
+
+export type StatusClass = "2xx" | "3xx" | "4xx" | "5xx";
+
+export interface StatusEmitter {
+  node: GraphNode;
+  /** Distinct status codes detected for this node (e.g. [500, 502]). */
+  codes: number[];
+  /** Status classes covered. */
+  classes: Set<StatusClass>;
+}
+
+export interface StatusClassGroup {
+  cls: StatusClass;
+  emitters: StatusEmitter[];
+  /** Total distinct emitter nodes in this class. */
+  count: number;
+}
+
+/** Map a known error-type name fragment → an HTTP status code. */
+const ERROR_NAME_STATUS: { re: RegExp; code: number }[] = [
+  { re: /badrequest|invalid|malformed|parse_?error|validation/i, code: 400 },
+  { re: /unauthor|unauthenticated|notoken|invalidtoken/i, code: 401 },
+  { re: /paymentreq|paymentrequired/i, code: 402 },
+  { re: /forbidden|denied|notallowed|accessdenied/i, code: 403 },
+  { re: /notfound|missing|nosuch|doesnotexist|not\s+found/i, code: 404 },
+  { re: /methodnotallowed/i, code: 405 },
+  { re: /conflict|duplicate|already\s*exists|unique_?violation/i, code: 409 },
+  { re: /gone/i, code: 410 },
+  { re: /unprocessable|semantic/i, code: 422 },
+  { re: /toomany|ratelimit|throttl/i, code: 429 },
+  { re: /internal|unexpected|panic|fatal/i, code: 500 },
+  { re: /notimplemented|unimplemented/i, code: 501 },
+  { re: /badgateway/i, code: 502 },
+  { re: /unavailable|servicedown/i, code: 503 },
+  { re: /timeout|deadline/i, code: 504 },
+];
+
+/** Classify a status code into its class. Returns null for <200 / unknown. */
+export function statusClassOf(code: number): StatusClass | null {
+  if (code >= 200 && code < 300) return "2xx";
+  if (code >= 300 && code < 400) return "3xx";
+  if (code >= 400 && code < 500) return "4xx";
+  if (code >= 500 && code < 600) return "5xx";
+  return null;
+}
+
+/** Extract the set of HTTP status codes a node can emit (heuristic). */
+export function statusCodesForNode(n: GraphNode): number[] {
+  const codes = new Set<number>();
+  const hay = `${n.name}\n${n.summary ?? ""}`;
+  // Explicit attr (e.g. error_type/finding carrying a status).
+  const a = n.attrs ?? {};
+  const attrStatus = a.status ?? a.statusCode ?? a.httpStatus ?? a.code;
+  if (typeof attrStatus === "number" && attrStatus >= 100 && attrStatus < 600) codes.add(attrStatus);
+  if (typeof attrStatus === "string" && /^\d{3}$/.test(attrStatus)) codes.add(parseInt(attrStatus, 10));
+
+  // c.JSON(500, …) / res.status(404) / WriteHeader(http.StatusXxx) / StatusCode: 502
+  const callRe = /(?:status(?:code)?|writeheader|json|sendstatus|status)\s*[(:=]?\s*(\d{3})\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = callRe.exec(hay)) !== null) {
+    const c = parseInt(m[1], 10);
+    if (c >= 100 && c < 600) codes.add(c);
+  }
+  // Standalone http.StatusXxx / "404 Not Found" style 3-digit codes near status words.
+  const bareRe = /\b(2\d\d|3\d\d|4\d\d|5\d\d)\b/g;
+  if (/status|http|error|code|respond|return/i.test(hay)) {
+    while ((m = bareRe.exec(hay)) !== null) {
+      const c = parseInt(m[1], 10);
+      if (c >= 200 && c < 600) codes.add(c);
+    }
+  }
+  // Named Go-style status constants: http.StatusInternalServerError, StatusNotFound …
+  const namedMap: Record<string, number> = {
+    statusok: 200, statuscreated: 201, statusaccepted: 202, statusnocontent: 204,
+    statusmovedpermanently: 301, statusfound: 302, statusnotmodified: 304,
+    statusbadrequest: 400, statusunauthorized: 401, statuspaymentrequired: 402,
+    statusforbidden: 403, statusnotfound: 404, statusmethodnotallowed: 405,
+    statusconflict: 409, statusgone: 410, statusunprocessableentity: 422,
+    statustoomanyrequests: 429, statusinternalservererror: 500,
+    statusnotimplemented: 501, statusbadgateway: 502,
+    statusserviceunavailable: 503, statusgatewaytimeout: 504,
+  };
+  const lower = hay.toLowerCase();
+  for (const [key, code] of Object.entries(namedMap)) {
+    if (lower.includes(key)) codes.add(code);
+  }
+  // error_type nodes: infer from the error name/summary even without a literal code.
+  if (n.type === "error_type" && codes.size === 0) {
+    for (const { re, code } of ERROR_NAME_STATUS) {
+      if (re.test(hay)) { codes.add(code); break; }
+    }
+  }
+  return [...codes].sort((x, y) => x - y);
+}
+
+/** True if the graph has ANY status-emitting nodes (gate for the UI). */
+export function hasStatusCodes(graph: KnowledgeGraph | null): boolean {
+  if (!graph) return false;
+  for (const n of graph.nodes) {
+    if (n.type === "route" || n.type === "endpoint" || n.type === "error_type" ||
+        CODE_TYPES.has(n.type) || (n.tags ?? []).includes("error_emitting")) {
+      if (statusCodesForNode(n).length > 0) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Item 98. Group every status-emitting node by status class (2xx/4xx/5xx).
+ * Considers routes, endpoints, error_types, code nodes, and anything tagged
+ * `error_emitting`. Heuristic — returns only classes that have ≥1 emitter.
+ */
+export function statusCodeMap(graph: KnowledgeGraph | null): StatusClassGroup[] {
+  if (!graph) return [];
+  const buckets = new Map<StatusClass, StatusEmitter[]>();
+  const order: StatusClass[] = ["2xx", "3xx", "4xx", "5xx"];
+  for (const n of graph.nodes) {
+    const codes = statusCodesForNode(n);
+    if (codes.length === 0) continue;
+    const classes = new Set<StatusClass>();
+    for (const c of codes) {
+      const cls = statusClassOf(c);
+      if (cls) classes.add(cls);
+    }
+    if (classes.size === 0) continue;
+    const emitter: StatusEmitter = { node: n, codes, classes };
+    for (const cls of classes) {
+      let l = buckets.get(cls);
+      if (!l) { l = []; buckets.set(cls, l); }
+      l.push(emitter);
+    }
+  }
+  const groups: StatusClassGroup[] = [];
+  for (const cls of order) {
+    const emitters = buckets.get(cls);
+    if (!emitters || emitters.length === 0) continue;
+    emitters.sort((a, b) => (a.codes[0] - b.codes[0]) || a.node.name.localeCompare(b.node.name));
+    groups.push({ cls, emitters, count: emitters.length });
+  }
+  return groups;
+}
+
+// ---------------------------------------------------------------------------
+// Item 60 — "Test Story" linear execution view. For a selected `test` node, a
+// reading-order ribbon of the files/functions it `covers`/`calls`, with
+// file-transition labels. Reuses the trace-tree shape (a linear list of hops).
+// ---------------------------------------------------------------------------
+
+const STORY_EDGE_TYPES: ReadonlySet<string> = new Set<string>(["covers", "calls", "tested_by"]);
+
+export interface TestStoryHop {
+  node: GraphNode;
+  /** True when this hop starts a new file vs the previous hop. */
+  fileTransition: boolean;
+  /** The file path of this hop (for the transition label). */
+  filePath: string | null;
+  /** Step index (1-based) in reading order. */
+  step: number;
+}
+
+export interface TestStory {
+  test: GraphNode;
+  hops: TestStoryHop[];
+  /** Distinct files the story passes through, in order. */
+  files: string[];
+}
+
+/** All `test` nodes (sorted by name) — for the Test Story selector. */
+export function testNodes(graph: KnowledgeGraph | null): GraphNode[] {
+  if (!graph) return [];
+  return graph.nodes
+    .filter((n) => n.type === "test")
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Item 60. Linearize the code a test exercises into reading order. Seeds at the
+ * test's directly-covered/called code nodes, then walks each one's outgoing
+ * `calls` chain depth-first (reading order), de-duping. Hops are annotated with
+ * file-transition flags so the ribbon can show "→ file.go" dividers.
+ * Returns a story with [] hops when the test has no covers/calls edges.
+ */
+export function testStory(graph: KnowledgeGraph | null, testId: string): TestStory | null {
+  if (!graph) return null;
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const test = byId.get(testId);
+  if (!test || test.type !== "test") return null;
+
+  // Forward call adjacency (code → callees), in graph order (reading order).
+  const callees = new Map<string, string[]>();
+  for (const e of graph.edges) {
+    if (e.type !== "calls") continue;
+    let l = callees.get(e.source);
+    if (!l) { l = []; callees.set(e.source, l); }
+    l.push(e.target);
+  }
+
+  // Seed roots: code nodes the test directly covers/calls (either direction).
+  const roots: string[] = [];
+  const seenRoot = new Set<string>();
+  for (const e of graph.edges) {
+    if (!STORY_EDGE_TYPES.has(e.type)) continue;
+    let otherId: string | null = null;
+    if (e.source === testId) otherId = e.target;
+    else if (e.target === testId) otherId = e.source;
+    if (!otherId || seenRoot.has(otherId)) continue;
+    const other = byId.get(otherId);
+    if (other && CODE_TYPES.has(other.type)) { seenRoot.add(otherId); roots.push(otherId); }
+  }
+
+  // DFS each root's call chain in order, collecting a linear hop list.
+  const ordered: GraphNode[] = [];
+  const visited = new Set<string>();
+  const walk = (id: string, depth: number) => {
+    if (visited.has(id) || depth > 8) return;
+    visited.add(id);
+    const n = byId.get(id);
+    if (!n || !CODE_TYPES.has(n.type)) return;
+    ordered.push(n);
+    for (const nxt of callees.get(id) ?? []) walk(nxt, depth + 1);
+  };
+  for (const r of roots) walk(r, 0);
+
+  const hops: TestStoryHop[] = [];
+  const files: string[] = [];
+  let prevFile: string | null = null;
+  ordered.forEach((n, i) => {
+    const filePath = n.filePath ?? null;
+    const fileTransition = i === 0 || filePath !== prevFile;
+    if (fileTransition && filePath && files[files.length - 1] !== filePath) files.push(filePath);
+    hops.push({ node: n, fileTransition, filePath, step: i + 1 });
+    prevFile = filePath;
+  });
+
+  return { test, hops, files };
+}
+
+/** True if the graph has ANY test node (gate for the Test Story UI). */
+export function hasTests(graph: KnowledgeGraph | null): boolean {
+  if (!graph) return false;
+  for (const n of graph.nodes) if (n.type === "test") return true;
+  return false;
+}
