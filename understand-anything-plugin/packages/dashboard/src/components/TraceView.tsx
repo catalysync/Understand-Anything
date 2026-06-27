@@ -200,8 +200,12 @@ function HopCode({
   const source = state.source;
   if (!source) return null;
 
-  const windowStart = range ? Math.max(1, range.start - 8) : undefined;
-  const windowEnd = range ? range.end + 12 : undefined;
+  // Short functions (typical of single-hop traces) get much more surrounding context
+  // so the card has substance and doesn't look cramped; long functions keep a tighter
+  // window. The user noted a one-hop trace's card was too small — this expands it.
+  const span = range ? range.end - range.start : 0;
+  const windowStart = range ? Math.max(1, range.start - (span < 50 ? 32 : 8)) : undefined;
+  const windowEnd = range ? range.end + (span < 50 ? 48 : 12) : undefined;
   // Feature 22: when a "where set" jump is active, tighten the highlight to that
   // single line so the assignment stands out within the hop's source.
   const effectiveRange = flashLine != null ? { start: flashLine, end: flashLine } : range;
