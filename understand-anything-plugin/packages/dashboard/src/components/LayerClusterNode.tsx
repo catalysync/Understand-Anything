@@ -16,6 +16,8 @@ export interface LayerClusterData extends Record<string, unknown> {
   fileCount: number;
   aggregateComplexity: string;
   layerColorIndex: number;
+  /** 200-79: resolved accent color (override → palette). Falls back to index. */
+  layerColor?: string;
   searchMatchCount?: number;
   onDrillIn: (layerId: string) => void;
 }
@@ -25,7 +27,8 @@ export type LayerClusterFlowNode = Node<LayerClusterData, "layer-cluster">;
 function LayerClusterNode({
   data,
 }: NodeProps<LayerClusterFlowNode>) {
-  const color = getLayerColor(data.layerColorIndex);
+  const palette = getLayerColor(data.layerColorIndex);
+  const color = { ...palette, label: data.layerColor ?? palette.label };
   const complexityColor =
     complexityColors[data.aggregateComplexity] ?? complexityColors.simple;
 

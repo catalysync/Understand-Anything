@@ -25,6 +25,11 @@ import type { ContainerFlowNode, ContainerNodeData } from "./ContainerNode";
 import Breadcrumb from "./Breadcrumb";
 import HotspotQuadrant from "./HotspotQuadrant";
 import ArchitecturePanel from "./ArchitecturePanel";
+import MetricTreemap from "./MetricTreemap";
+import CityHotspotMap from "./CityHotspotMap";
+import DependencyMatrix from "./DependencyMatrix";
+import ReadingOrderPanel from "./ReadingOrderPanel";
+import { resolveLayerColor, resolveLayerName } from "../utils/layerOverrides";
 import {
   computeBoundaryViolations,
   violationEdgeKeySet,
@@ -301,6 +306,8 @@ function useOverviewGraph() {
   // 300-series item 26: recolor layer→layer edges that carry a boundary violation.
   const boundaryOverlay = useDashboardStore((s) => s.boundaryOverlay);
   const archRules = useDashboardStore((s) => s.archRules);
+  // 200-79: per-layer color/name overrides propagate to cluster nodes + edges.
+  const layerOverrides = useDashboardStore((s) => s.layerOverrides);
 
   // Build cluster nodes / flow edges / dims synchronously; only the layout
   // call itself is async, so we memo the structural pieces and run ELK in an
@@ -340,11 +347,12 @@ function useOverviewGraph() {
         position: { x: 0, y: 0 },
         data: {
           layerId: layer.id,
-          layerName: layer.name,
+          layerName: resolveLayerName(layerOverrides, layer.id, layer.name),
           layerDescription: layer.description,
           fileCount: layer.nodeIds.length,
           aggregateComplexity,
           layerColorIndex: i,
+          layerColor: resolveLayerColor(layerOverrides, layer.id, i).label,
           searchMatchCount: searchMatchByLayer.get(layer.id),
           onDrillIn: drillIntoLayer,
         },
@@ -358,26 +366,39 @@ function useOverviewGraph() {
       boundaryOverlay
         ? violationLayerPairKeys(computeBoundaryViolations(graph, archRules))
         : null;
+    // 300-59: edge bundling — each layer-pair is already aggregated into ONE
+    // edge. Width ∝ count (bundled thickness), label shows the count, and the
+    // edge is clickable to "expand" (filter the graph to that layer pair via
+    // the matrix cell filter the GraphView already consumes).
     const flowEdges: Edge[] = aggregated.map((agg, i) => {
       const [a, b] =
         agg.sourceLayerId < agg.targetLayerId
           ? [agg.sourceLayerId, agg.targetLayerId]
           : [agg.targetLayerId, agg.sourceLayerId];
       const isViolation = violationPairs?.has(`${a}|${b}`) ?? false;
+      // Bundled thickness: scale by count so heavy bundles read as thicker ropes.
+      const width = Math.max(1, Math.min(1.5 + Math.log2(agg.count + 1) * 1.4, 9));
       return {
         id: `le-${i}`,
         source: agg.sourceLayerId,
         target: agg.targetLayerId,
         label: `${agg.count}`,
+        // Carry the pair + count so the click handler can expand the bundle.
+        data: {
+          bundleSource: agg.sourceLayerId,
+          bundleTarget: agg.targetLayerId,
+          bundleCount: agg.count,
+          bundleTypes: agg.edgeTypes.join(", "),
+        },
         style: isViolation
           ? {
               stroke: "#d35d6e",
-              strokeWidth: Math.max(2, Math.min(1 + Math.log2(agg.count + 1), 5)),
+              strokeWidth: Math.max(2, width),
               strokeDasharray: "6 3",
             }
           : {
-              stroke: "rgba(212,165,116,0.4)",
-              strokeWidth: Math.min(1 + Math.log2(agg.count + 1), 5),
+              stroke: "rgba(212,165,116,0.45)",
+              strokeWidth: width,
             },
         labelStyle: { fill: isViolation ? "#d35d6e" : "#a39787", fontSize: 11, fontWeight: 600 },
       };
@@ -389,7 +410,7 @@ function useOverviewGraph() {
     }
 
     return { clusterNodes, flowEdges, dims };
-  }, [graph, nodesById, nodeIdToLayerId, searchResults, drillIntoLayer, boundaryOverlay, archRules]);
+  }, [graph, nodesById, nodeIdToLayerId, searchResults, drillIntoLayer, boundaryOverlay, archRules, layerOverrides]);
 
   const [overview, setOverview] = useState<{ nodes: Node[]; edges: Edge[] }>({
     nodes: [],
@@ -1818,13 +1839,30 @@ function GraphViewInner() {
 
   const { fitView, getViewport, setCenter } = useReactFlow();
 
+  // 200-81: when a matrix cell is selected, dim every overview bundle except the
+  // matching layer pair so the graph "filters to those edges".
+  const matrixCellFilter = useDashboardStore((s) => s.matrixCellFilter);
+  const displayEdges = useMemo(() => {
+    if (navigationLevel !== "overview" || !matrixCellFilter) return initialEdges;
+    const [src, tgt] = matrixCellFilter;
+    return initialEdges.map((e) => {
+      const d = e.data as { bundleSource?: string; bundleTarget?: string } | undefined;
+      const match =
+        (d?.bundleSource === src && d?.bundleTarget === tgt) ||
+        (d?.bundleSource === tgt && d?.bundleTarget === src);
+      return match
+        ? { ...e, style: { ...e.style, stroke: "#d35d6e", strokeWidth: Math.max(3, Number(e.style?.strokeWidth ?? 3)) } }
+        : { ...e, style: { ...e.style, opacity: 0.08 } };
+    });
+  }, [initialEdges, navigationLevel, matrixCellFilter]);
+
   useEffect(() => {
     setNodes(initialNodes);
   }, [initialNodes, setNodes]);
 
   useEffect(() => {
-    setEdges(initialEdges);
-  }, [initialEdges, setEdges]);
+    setEdges(displayEdges);
+  }, [displayEdges, setEdges]);
 
   // 300-series item 25: C4 boundary/zoom level. "File" expands every container
   // (folders → individual file nodes inside nested boundary boxes); "Layer"
@@ -1999,6 +2037,22 @@ function GraphViewInner() {
     selectNode(null);
   }, [selectNode]);
 
+  // 300-59: click a bundled layer→layer edge to "expand" it — open the
+  // dependency matrix and filter the graph to that layer pair's edges.
+  const onEdgeClick = useCallback(
+    (_: React.MouseEvent, edge: { data?: unknown }) => {
+      if (navigationLevel !== "overview") return;
+      const d = edge.data as
+        | { bundleSource?: string; bundleTarget?: string }
+        | undefined;
+      if (!d?.bundleSource || !d?.bundleTarget) return;
+      const store = useDashboardStore.getState();
+      store.setMatrixCellFilter([d.bundleSource, d.bundleTarget]);
+      store.setMatrixPanelOpen(true);
+    },
+    [navigationLevel],
+  );
+
   // K3: right-click a structural node → shared JumpActions menu. Skip the
   // overview lens (its "nodes" are layer clusters) and portal nodes.
   const onNodeContextMenu = useCallback(
@@ -2071,6 +2125,7 @@ function GraphViewInner() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={onNodeClick}
+        onEdgeClick={onEdgeClick}
         onNodeContextMenu={onNodeContextMenu}
         onPaneClick={onPaneClick}
         onMove={navigationLevel === "layer-detail" ? onMove : undefined}
@@ -2289,6 +2344,11 @@ function GraphViewInner() {
       <HotspotQuadrant />
       {/* 300-series items 9-10/22/26: architecture & API-surface panel */}
       <ArchitecturePanel />
+      {/* Visualization & structural-polish tier */}
+      <MetricTreemap />
+      <CityHotspotMap />
+      <DependencyMatrix />
+      <ReadingOrderPanel />
     </div>
   );
 }

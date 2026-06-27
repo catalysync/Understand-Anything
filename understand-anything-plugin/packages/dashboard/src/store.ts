@@ -34,8 +34,14 @@ import {
   type BoundaryRule,
   deriveDefaultRules,
 } from "./utils/archLayer";
+import {
+  type LayerOverrideMap,
+  loadLayerOverrides,
+  saveLayerOverrides,
+} from "./utils/layerOverrides";
 
 export type { OnboardingGoal };
+export type { LayerOverrideMap };
 export type { AppSettings, RecentEntity, PinnedEntity };
 export type { BoundaryRule };
 
@@ -533,6 +539,31 @@ interface DashboardStore {
   archPanelOpen: boolean;
   toggleArchPanel: () => void;
   setArchPanelOpen: (open: boolean) => void;
+
+  // ── Visualization & structural-polish tier ────────────────────────────────
+  /** 300-42: metric treemap panel open. */
+  treemapPanelOpen: boolean;
+  toggleTreemapPanel: () => void;
+  setTreemapPanelOpen: (open: boolean) => void;
+  /** 300-50: circle-packing "city" hotspot map panel open. */
+  cityPanelOpen: boolean;
+  toggleCityPanel: () => void;
+  setCityPanelOpen: (open: boolean) => void;
+  /** 200-81: cross-layer dependency matrix panel open. */
+  matrixPanelOpen: boolean;
+  toggleMatrixPanel: () => void;
+  setMatrixPanelOpen: (open: boolean) => void;
+  /** 200-156: reading-order ("read like a book") panel open. */
+  readingPanelOpen: boolean;
+  toggleReadingPanel: () => void;
+  setReadingPanelOpen: (open: boolean) => void;
+  /** 200-81: active matrix cell filter [rowLayerId, colLayerId] → graph shows only those edges' nodes. null = off. */
+  matrixCellFilter: [string, string] | null;
+  setMatrixCellFilter: (cell: [string, string] | null) => void;
+  /** 200-79: per-layer color/name overrides (persisted per project). */
+  layerOverrides: LayerOverrideMap;
+  setLayerOverride: (layerId: string, patch: { color?: string; name?: string }) => void;
+  resetLayerOverride: (layerId: string) => void;
 
   setGraph: (graph: KnowledgeGraph) => void;
   selectNode: (nodeId: string | null) => void;
@@ -1246,6 +1277,44 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   toggleArchPanel: () => set((s) => ({ archPanelOpen: !s.archPanelOpen })),
   setArchPanelOpen: (open) => set({ archPanelOpen: open }),
 
+  // ── Visualization & structural-polish tier ────────────────────────────────
+  treemapPanelOpen: false,
+  toggleTreemapPanel: () => set((s) => ({ treemapPanelOpen: !s.treemapPanelOpen })),
+  setTreemapPanelOpen: (open) => set({ treemapPanelOpen: open }),
+  cityPanelOpen: false,
+  toggleCityPanel: () => set((s) => ({ cityPanelOpen: !s.cityPanelOpen })),
+  setCityPanelOpen: (open) => set({ cityPanelOpen: open }),
+  matrixPanelOpen: false,
+  toggleMatrixPanel: () => set((s) => ({ matrixPanelOpen: !s.matrixPanelOpen })),
+  setMatrixPanelOpen: (open) => set({ matrixPanelOpen: open }),
+  readingPanelOpen: false,
+  toggleReadingPanel: () => set((s) => ({ readingPanelOpen: !s.readingPanelOpen })),
+  setReadingPanelOpen: (open) => set({ readingPanelOpen: open }),
+  matrixCellFilter: null,
+  setMatrixCellFilter: (cell) => set({ matrixCellFilter: cell }),
+  layerOverrides: {},
+  setLayerOverride: (layerId, patch) =>
+    set((s) => {
+      const prev = s.layerOverrides[layerId] ?? {};
+      const next: LayerOverrideMap = {
+        ...s.layerOverrides,
+        [layerId]: {
+          ...prev,
+          ...(patch.color !== undefined ? { color: patch.color } : {}),
+          ...(patch.name !== undefined ? { name: patch.name } : {}),
+        },
+      };
+      saveLayerOverrides(settingsProjectKey, next);
+      return { layerOverrides: next };
+    }),
+  resetLayerOverride: (layerId) =>
+    set((s) => {
+      const next = { ...s.layerOverrides };
+      delete next[layerId];
+      saveLayerOverrides(settingsProjectKey, next);
+      return { layerOverrides: next };
+    }),
+
   setGraph: (graph) => {
     const searchEngine = new SearchEngine(graph.nodes);
     const query = get().searchQuery;
@@ -1842,6 +1911,7 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       settings,
       destinations,
       archRules,
+      layerOverrides: loadLayerOverrides(settingsProjectKey),
       // Apply persisted trace defaults at load.
       traceDepth: Math.max(1, Math.min(6, settings.defaultTraceDepth)),
       traceDirection: settings.defaultTraceDirection,

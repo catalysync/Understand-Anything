@@ -325,6 +325,15 @@ function DashboardContent({
   const toggleResilienceBadges = useDashboardStore((s) => s.toggleResilienceBadges);
   const hotspotPanelOpen = useDashboardStore((s) => s.hotspotPanelOpen);
   const toggleHotspotPanel = useDashboardStore((s) => s.toggleHotspotPanel);
+  // Visualization & structural-polish tier panels.
+  const treemapPanelOpen = useDashboardStore((s) => s.treemapPanelOpen);
+  const toggleTreemapPanel = useDashboardStore((s) => s.toggleTreemapPanel);
+  const cityPanelOpen = useDashboardStore((s) => s.cityPanelOpen);
+  const toggleCityPanel = useDashboardStore((s) => s.toggleCityPanel);
+  const matrixPanelOpen = useDashboardStore((s) => s.matrixPanelOpen);
+  const toggleMatrixPanel = useDashboardStore((s) => s.toggleMatrixPanel);
+  const readingPanelOpen = useDashboardStore((s) => s.readingPanelOpen);
+  const toggleReadingPanel = useDashboardStore((s) => s.toggleReadingPanel);
   // 300-series items 9-10/21/22/25/26: architecture & API-surface tier.
   const archPanelOpen = useDashboardStore((s) => s.archPanelOpen);
   const toggleArchPanel = useDashboardStore((s) => s.toggleArchPanel);
@@ -975,6 +984,58 @@ function DashboardContent({
                   }`}
                 >
                   ⊞ Architecture
+                </button>
+                {/* 300-42: metric treemap */}
+                <button
+                  type="button"
+                  onClick={toggleTreemapPanel}
+                  title="Metric treemap — size = LOC/file-count, color = coverage/complexity/churn; drill folders"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    treemapPanelOpen
+                      ? "border-[#5a9e6f]/50 bg-[#5a9e6f]/10 text-[#5a9e6f]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  ▥ Treemap
+                </button>
+                {/* 300-50: circle-packing city map */}
+                <button
+                  type="button"
+                  onClick={toggleCityPanel}
+                  title="Circle-packing city map — folders nest as circles, size = LOC, color = health (complexity × churn)"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    cityPanelOpen
+                      ? "border-[#8b6fb0]/50 bg-[#8b6fb0]/10 text-[#8b6fb0]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  ◉ City
+                </button>
+                {/* 200-81: cross-layer dependency matrix */}
+                <button
+                  type="button"
+                  onClick={toggleMatrixPanel}
+                  title="Cross-layer dependency matrix — layer×layer imports/calls heatmap; click a cell to filter the graph"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    matrixPanelOpen
+                      ? "border-[#4a7c9b]/50 bg-[#4a7c9b]/10 text-[#4a7c9b]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  ▦ Matrix
+                </button>
+                {/* 200-156: reading-order mode */}
+                <button
+                  type="button"
+                  onClick={toggleReadingPanel}
+                  title="Reading order — read the repo like a book (BFS from entrypoints), one file at a time"
+                  className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border transition-colors ${
+                    readingPanelOpen
+                      ? "border-[#c9a06c]/50 bg-[#c9a06c]/10 text-[#c9a06c]"
+                      : "border-border-medium bg-elevated text-text-muted hover:text-text-secondary"
+                  }`}
+                >
+                  ▤ Read
                 </button>
               </>
             )}
