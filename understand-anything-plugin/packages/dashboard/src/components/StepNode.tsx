@@ -15,6 +15,7 @@ export type StepFlowNode = Node<StepNodeData, "step-node">;
 
 function StepNode({ data }: NodeProps<StepFlowNode>) {
   const selectNode = useDashboardStore((s) => s.selectNode);
+  const openContextMenu = useDashboardStore((s) => s.openContextMenu);
   const selectedNodeId = useDashboardStore((s) => s.selectedNodeId);
   const isSelected = selectedNodeId === data.stepId;
 
@@ -26,6 +27,10 @@ function StepNode({ data }: NodeProps<StepFlowNode>) {
           : "border-border-subtle bg-elevated hover:border-accent/40"
       }`}
       onClick={() => selectNode(data.stepId)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        openContextMenu(data.stepId, e.clientX, e.clientY);
+      }}
     >
       <Handle type="target" position={Position.Left} className="!bg-text-muted/40 !w-1.5 !h-1.5" />
       <Handle type="source" position={Position.Right} className="!bg-text-muted/40 !w-1.5 !h-1.5" />

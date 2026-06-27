@@ -388,10 +388,28 @@ interface DashboardStore {
   clearContextChips: () => void;
 
   setDomainGraph: (graph: KnowledgeGraph) => void;
-  setViewMode: (mode: ViewMode) => void;
+  /**
+   * K2: switch view mode. By default the focused node is CARRIED across views
+   * (re-root trace / focus structural / expand domain) instead of being reset.
+   * Pass `{ keepSelection: false }` for the legacy hard-reset behavior.
+   */
+  setViewMode: (mode: ViewMode, opts?: { keepSelection?: boolean }) => void;
   setIsKnowledgeGraph: (value: boolean) => void;
   navigateToDomain: (domainId: string) => void;
   clearActiveDomain: () => void;
+
+  /**
+   * K1: focus a single entity consistently across whatever the current (or a
+   * given) view is. Sets the right per-view target so one call lands the user
+   * on the node: trace → re-root, domain → select within domain, structural/
+   * knowledge → select + layer-navigate. Keeps existing state intact.
+   */
+  focusEntity: (nodeId: string, opts?: { view?: ViewMode }) => void;
+
+  // K3: shared node context menu. Anchored at viewport (x,y); null = closed.
+  contextMenu: { nodeId: string; x: number; y: number } | null;
+  openContextMenu: (nodeId: string, x: number, y: number) => void;
+  closeContextMenu: () => void;
 
   // Container expand/collapse + lazy layout caches
   expandedContainers: Set<string>;
@@ -1107,16 +1125,62 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     set({ isKnowledgeGraph: value });
   },
 
-  setViewMode: (mode) => {
-    set({
+  setViewMode: (mode, opts) => {
+    const keepSelection = opts?.keepSelection ?? true;
+    const { selectedNodeId, traceRoot, nodeIdToLayerId } = get();
+    // Always close the code viewer when switching the top-level view.
+    const base = {
       viewMode: mode,
-      selectedNodeId: null,
-      focusNodeId: null,
       codeViewerOpen: false,
       codeViewerNodeId: null,
       codeViewerExpanded: false,
-    });
+    };
+    if (!keepSelection || !selectedNodeId) {
+      set({ ...base, selectedNodeId: null, focusNodeId: null });
+      return;
+    }
+    // K2: carry the focused node across views, wiring the right per-view target.
+    if (mode === "trace") {
+      // Re-root the trace at the focused node (preserve existing root if it
+      // already matches so we don't blow away a deep breadcrumb).
+      const patch: Partial<DashboardStore> =
+        traceRoot === selectedNodeId
+          ? {}
+          : { traceRoot: selectedNodeId, traceStack: [selectedNodeId], tracePathTarget: null };
+      set({ ...base, ...patch });
+    } else if (mode === "structural") {
+      // Land on the node in its layer so it's actually visible.
+      const layerId = nodeIdToLayerId.get(selectedNodeId) ?? null;
+      set({
+        ...base,
+        ...(layerId
+          ? { navigationLevel: "layer-detail" as const, activeLayerId: layerId }
+          : {}),
+      });
+    } else {
+      // domain / knowledge: keep the selection; the view will surface it.
+      set(base);
+    }
   },
+
+  focusEntity: (nodeId, opts) => {
+    const view = opts?.view ?? get().viewMode;
+    if (view === "trace") {
+      get().startTraceAt(nodeId);
+    } else if (view === "domain") {
+      set({ viewMode: "domain", selectedNodeId: nodeId });
+    } else if (view === "knowledge") {
+      set({ viewMode: "knowledge", selectedNodeId: nodeId });
+    } else {
+      // structural — navigate into the node's layer and select it.
+      set({ viewMode: "structural" });
+      get().navigateToNodeInLayer(nodeId);
+    }
+  },
+
+  contextMenu: null,
+  openContextMenu: (nodeId, x, y) => set({ contextMenu: { nodeId, x, y } }),
+  closeContextMenu: () => set({ contextMenu: null }),
 
   navigateToDomain: (domainId) => {
     const { selectedNodeId, nodeHistory } = get();

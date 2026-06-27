@@ -1497,6 +1497,17 @@ function GraphViewInner() {
     selectNode(null);
   }, [selectNode]);
 
+  // K3: right-click a structural node → shared JumpActions menu. Skip the
+  // overview lens (its "nodes" are layer clusters) and portal nodes.
+  const onNodeContextMenu = useCallback(
+    (event: React.MouseEvent, node: { id: string }) => {
+      if (navigationLevel === "overview" || node.id.startsWith("portal:")) return;
+      event.preventDefault();
+      useDashboardStore.getState().openContextMenu(node.id, event.clientX, event.clientY);
+    },
+    [navigationLevel],
+  );
+
   if (!graph) {
     return (
       <div className="h-full w-full flex items-center justify-center bg-root rounded-lg">
@@ -1525,6 +1536,7 @@ function GraphViewInner() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={onNodeClick}
+        onNodeContextMenu={onNodeContextMenu}
         onPaneClick={onPaneClick}
         onMove={navigationLevel === "layer-detail" ? onMove : undefined}
         onInit={setReactFlowInstance}

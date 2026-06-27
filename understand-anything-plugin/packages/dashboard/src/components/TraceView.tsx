@@ -733,7 +733,14 @@ function HopCardInner({
         style={heatOn ? { boxShadow: `inset 4px 0 0 ${heatColor(heat)}` } : undefined}
       >
         {/* Header */}
-        <div className="px-3 py-2.5 flex items-start gap-2">
+        <div
+          className="px-3 py-2.5 flex items-start gap-2"
+          onContextMenu={(e) => {
+            // K3: right-click a trace hop → shared JumpActions menu.
+            e.preventDefault();
+            useDashboardStore.getState().openContextMenu(node.id, e.clientX, e.clientY);
+          }}
+        >
           <span className="text-[10px] font-mono text-text-muted mt-0.5 shrink-0">
             {index + 1}
           </span>

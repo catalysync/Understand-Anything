@@ -18,6 +18,7 @@ function DomainClusterNode({ data }: NodeProps<DomainClusterFlowNode>) {
   const navigateToDomain = useDashboardStore((s) => s.navigateToDomain);
   const selectedNodeId = useDashboardStore((s) => s.selectedNodeId);
   const selectNode = useDashboardStore((s) => s.selectNode);
+  const openContextMenu = useDashboardStore((s) => s.openContextMenu);
   const isSelected = selectedNodeId === data.domainId;
 
   return (
@@ -29,6 +30,10 @@ function DomainClusterNode({ data }: NodeProps<DomainClusterFlowNode>) {
       }`}
       onClick={() => selectNode(data.domainId)}
       onDoubleClick={() => navigateToDomain(data.domainId)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        openContextMenu(data.domainId, e.clientX, e.clientY);
+      }}
     >
       <Handle type="target" position={Position.Left} className="!bg-accent/60 !w-2 !h-2" />
       <Handle type="source" position={Position.Right} className="!bg-accent/60 !w-2 !h-2" />

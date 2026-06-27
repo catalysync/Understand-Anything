@@ -16,6 +16,7 @@ export type FlowFlowNode = Node<FlowNodeData, "flow-node">;
 
 function FlowNode({ data }: NodeProps<FlowFlowNode>) {
   const selectNode = useDashboardStore((s) => s.selectNode);
+  const openContextMenu = useDashboardStore((s) => s.openContextMenu);
   const selectedNodeId = useDashboardStore((s) => s.selectedNodeId);
   const isSelected = selectedNodeId === data.flowId;
 
@@ -27,6 +28,10 @@ function FlowNode({ data }: NodeProps<FlowFlowNode>) {
           : "border-border-medium bg-surface hover:border-accent/50"
       }`}
       onClick={() => selectNode(data.flowId)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        openContextMenu(data.flowId, e.clientX, e.clientY);
+      }}
     >
       <Handle type="target" position={Position.Left} className="!bg-accent/60 !w-2 !h-2" />
       <Handle type="source" position={Position.Right} className="!bg-accent/60 !w-2 !h-2" />
