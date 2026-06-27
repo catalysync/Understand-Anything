@@ -1,5 +1,4 @@
-import type React from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useDashboardStore } from "../store";
 import type { ContextChip, TraceLevel } from "../store";
 import CodeBlock from "./CodeBlock";
@@ -44,6 +43,17 @@ import {
   type DiffStatus,
 } from "./traceDebug";
 import { callCountOf } from "./traceGraph";
+import {
+  colorForNode,
+  buildLegend,
+  type ColorContext,
+  type LegendEntry,
+} from "./traceColor";
+import {
+  traceToMarkdown,
+  downloadMarkdown,
+  slugify,
+} from "./traceExport";
 import type { GraphNode, KnowledgeGraph } from "@understand-anything/core/types";
 
 interface TraceViewProps {
@@ -159,6 +169,7 @@ function HopCode({
   inlayHints,
   onPeekNode,
   flashLine,
+  prettyFormat,
 }: {
   node: GraphNode;
   accessToken: string;
@@ -168,6 +179,8 @@ function HopCode({
   inlayHints: boolean;
   onPeekNode: (id: string) => void;
   flashLine?: number | null;
+  /** Wave-5 feature 45a: comfortable wrapping/indent display (CSS only). */
+  prettyFormat?: boolean;
 }) {
   const range = node.lineRange ? { start: node.lineRange[0], end: node.lineRange[1] } : null;
   const language = state.source?.language ?? fallbackLanguage(node.filePath);
@@ -192,7 +205,12 @@ function HopCode({
   const effectiveRange = flashLine != null ? { start: flashLine, end: flashLine } : range;
 
   return (
-    <div className="max-h-[70vh] overflow-auto bg-root">
+    <div
+      className={`max-h-[70vh] overflow-auto bg-root ${
+        prettyFormat ? "[&_code]:whitespace-pre-wrap [&_pre]:whitespace-pre-wrap [&_*]:!break-words" : ""
+      }`}
+      data-pretty={prettyFormat ? "1" : "0"}
+    >
       {flashLine != null && (
         <div
           data-testid="where-set-flash"
@@ -441,7 +459,7 @@ function FoldedHopRow({
   );
 }
 
-function HopCard({
+function HopCardInner({
   node,
   index,
   defaultExpanded,
@@ -464,6 +482,7 @@ function HopCard({
   scrollToLine,
   onCitation,
   buildSubtreeContext,
+  colorOverride,
 }: {
   node: GraphNode;
   index: number;
@@ -489,6 +508,8 @@ function HopCard({
   onCitation: (file: string, line: number) => void;
   /** Feature 35: gather this hop's subtree as `context` text for mode:subtree. */
   buildSubtreeContext: (rootId: string) => string;
+  /** Wave-5 feature 44: color from the "Color by:" dimension (null = per-type). */
+  colorOverride: string | null;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [showCallers, setShowCallers] = useState(false);
@@ -558,6 +579,19 @@ function HopCard({
   const [noteOpen, setNoteOpen] = useState(false);
   const [showScope, setShowScope] = useState(false);
   const [showCfg, setShowCfg] = useState(false);
+  // Wave-5 feature 45: per-hop "format" toggle for comfortable source display.
+  const [prettyFormat, setPrettyFormat] = useState(false);
+  // Wave-5 feature 45: a separate explain session for the "rewrite in plain
+  // English" book panel (kept distinct from the Go-note session above).
+  const { state: rewriteNote, explain: runRewrite, askFollowUp: askRewrite, reset: resetRewrite } =
+    useExplain(accessToken);
+  const rewritePlainEnglish = () => {
+    if (!node.filePath || !node.lineRange) return;
+    runRewrite(node.filePath, node.lineRange[0], node.lineRange[1], node.lineRange[0], {
+      ...explainOpts,
+      rules: `${explainOpts.rules ?? ""}\nRewrite this code's behavior in plain English prose for a non-programmer: what it does, step by step, no jargon.`.trim(),
+    });
+  };
 
   // ---- Wave-3 per-hop debug metadata (heuristic, from the source slice) ----
   const sliceStart = node.lineRange ? Math.max(1, node.lineRange[0]) : 1;
@@ -673,7 +707,10 @@ function HopCard({
         : "";
   const predicateRing = predicateMatch === true ? "ring-2 ring-accent border-accent" : "";
   const errorRing = errorPathOn && isError ? "ring-1 ring-[rgb(248,113,113)] border-[rgb(248,113,113)]" : "";
-  const dotColor = heatOn ? heatColor(heat) : color;
+  // Wave-5 feature 44: the dimension color overrides the per-type color for the
+  // rail dot + type badge (heat, a distinct overlay, still wins when enabled).
+  const railColor = colorOverride ?? color;
+  const dotColor = heatOn ? heatColor(heat) : railColor;
 
   return (
     <div className={`relative pl-6 transition-opacity ${dimAll ? "opacity-40" : ""}`} ref={registerRef}>
@@ -701,11 +738,12 @@ function HopCard({
             {index + 1}
           </span>
           <span
+            data-testid="hop-type-badge"
             className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded border shrink-0"
             style={{
-              color,
-              borderColor: `color-mix(in srgb, ${color} 30%, transparent)`,
-              backgroundColor: `color-mix(in srgb, ${color} 10%, transparent)`,
+              color: railColor,
+              borderColor: `color-mix(in srgb, ${railColor} 30%, transparent)`,
+              backgroundColor: `color-mix(in srgb, ${railColor} 10%, transparent)`,
             }}
           >
             {node.type}
@@ -973,6 +1011,18 @@ function HopCard({
           >
             ⑂ control-flow
           </button>
+          {/* Feature 45a: pretty-print / comfortable source-wrapping toggle */}
+          <button
+            type="button"
+            data-testid="format-toggle"
+            onClick={() => setPrettyFormat((v) => !v)}
+            className={`text-[10px] font-semibold px-2 py-1 rounded border transition-colors ${
+              prettyFormat ? "border-gold/60 text-gold bg-gold/10" : "border-border-subtle text-text-muted hover:text-text-primary"
+            }`}
+            title="Pretty-print: wrap + relax indentation for comfortable reading (display only)"
+          >
+            ❡ format
+          </button>
         </div>
 
         {/* Feature 14: implementations expander */}
@@ -1142,6 +1192,16 @@ function HopCard({
                   >
                     ⌥ Explain subtree
                   </button>
+                  {/* Feature 45b: plain-English rewrite via the existing claude endpoint */}
+                  <button
+                    type="button"
+                    data-testid="rewrite-plain-english"
+                    onClick={rewritePlainEnglish}
+                    className="text-[10px] font-semibold text-node-schema hover:brightness-125 transition-all"
+                    title="Rewrite this code's behavior in plain English (claude -p)"
+                  >
+                    ✦ Rewrite in plain English
+                  </button>
                 </div>
               ) : (
                 <ExplainPanel
@@ -1160,6 +1220,21 @@ function HopCard({
                   onLevel={setTraceLevel}
                 />
               )}
+            </div>
+          )}
+
+          {/* Feature 45b: plain-English rewrite result in the book panel */}
+          {rewriteNote.status !== "idle" && (
+            <div className="mt-2" data-testid="rewrite-panel">
+              <ExplainPanel
+                state={rewriteNote}
+                title="✦ Plain English"
+                onClose={resetRewrite}
+                onAsk={(q) => askRewrite(q, explainOpts)}
+                onCitation={onCitation}
+                level={traceLevel}
+                onLevel={setTraceLevel}
+              />
             </div>
           )}
         </div>
@@ -1183,6 +1258,7 @@ function HopCard({
               inlayHints
               onPeekNode={(id) => setPeekId((cur) => (cur === id ? null : id))}
               flashLine={highlightLine}
+              prettyFormat={prettyFormat}
             />
           </div>
         )}
@@ -1259,6 +1335,39 @@ function HopCard({
     </div>
   );
 }
+
+/**
+ * Wave-5 feature 47 (reactive re-render / perf): wrap the hop card in
+ * React.memo with a custom prop comparator so toggling one hop's watch / fold /
+ * explanation re-renders only the affected hop(s) — not the whole trace column.
+ * Honest scope: this is a render optimization (memoized props/selectors), not a
+ * dataflow engine. Callback props (pushTrace, onReportMeta, onCitation,
+ * buildSubtreeContext, step fns) are referentially stable from the parent, so a
+ * shallow compare of the value props below is sufficient and safe.
+ */
+const HopCard = React.memo(HopCardInner, (prev, next) => {
+  return (
+    prev.node === next.node &&
+    prev.index === next.index &&
+    prev.defaultExpanded === next.defaultExpanded &&
+    prev.accessToken === next.accessToken &&
+    prev.graph === next.graph &&
+    prev.isCritical === next.isCritical &&
+    prev.dimmed === next.dimmed &&
+    prev.muted === next.muted &&
+    prev.heatOn === next.heatOn &&
+    prev.errorPathOn === next.errorPathOn &&
+    prev.predicateMatch === next.predicateMatch &&
+    prev.diffStatus === next.diffStatus &&
+    prev.scrollToLine === next.scrollToLine &&
+    prev.colorOverride === next.colorOverride &&
+    // `watches` is rebuilt as a new array on every render in the parent; compare
+    // by contents so a stable watch list doesn't force a re-render, but adding a
+    // watch (which changes badges) does.
+    prev.watches.length === next.watches.length &&
+    prev.watches.every((w, i) => w === next.watches[i])
+  );
+});
 
 /**
  * A callee chip: click name → descend (trace); click ⊙ → peek inline (feature
@@ -1826,6 +1935,9 @@ export default function TraceView({ accessToken }: TraceViewProps) {
   const selectNode = useDashboardStore((s) => s.selectNode);
   const setViewMode = useDashboardStore((s) => s.setViewMode);
   const saveTour = useDashboardStore((s) => s.saveTour);
+  const removeTour = useDashboardStore((s) => s.removeTour);
+  const tours = useDashboardStore((s) => s.workspace.tours);
+  const pushTraceFn = useDashboardStore((s) => s.pushTrace);
   const toggleBookmarksPanel = useDashboardStore((s) => s.toggleBookmarksPanel);
 
   // Wave-1 nav state
@@ -1841,6 +1953,8 @@ export default function TraceView({ accessToken }: TraceViewProps) {
   const criticalOn = useDashboardStore((s) => s.traceCriticalPath);
   const pathTarget = useDashboardStore((s) => s.tracePathTarget);
   const setPathTarget = useDashboardStore((s) => s.setPathTarget);
+  const colorBy = useDashboardStore((s) => s.traceColorBy);
+  const nodeIdToLayerId = useDashboardStore((s) => s.nodeIdToLayerId);
 
   // Wave-3 debug state
   const watches = useDashboardStore((s) => s.workspace.watches);
@@ -1856,6 +1970,10 @@ export default function TraceView({ accessToken }: TraceViewProps) {
   const [copied, setCopied] = useState(false);
   const [tourSaved, setTourSaved] = useState(false);
   const [snapped, setSnapped] = useState(false);
+  // Feature 49 (export note) + feature 48 (tours panel) local UI state.
+  const [noteCopied, setNoteCopied] = useState(false);
+  const [noteMenuOpen, setNoteMenuOpen] = useState(false);
+  const [toursPanelOpen, setToursPanelOpen] = useState(false);
   const hopRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   // Feature 21/22: per-hop debug metadata reported up by HopCards.
   const [hopMeta, setHopMeta] = useState<Record<string, { isError: boolean; watchHits: number }>>({});
@@ -1899,6 +2017,40 @@ export default function TraceView({ accessToken }: TraceViewProps) {
 
   // ---- Wave-3 derived debug state --------------------------------------
   const currentIds = useMemo(() => hops.map((h) => h.id), [hops]);
+
+  // ---- Wave-5 feature 44: color-by context + per-hop colors + legend ----
+  // Layer membership name per hop (for the "layer" dimension). Reuses the
+  // store's first-matching-layer index; resolves id → human layer name.
+  const layerNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    if (!graph) return m;
+    const layerById = new Map(graph.layers.map((l) => [l.id, l.name]));
+    for (const h of hops) {
+      const lid = nodeIdToLayerId.get(h.id);
+      if (lid) m.set(h.id, layerById.get(lid) ?? lid);
+    }
+    return m;
+  }, [graph, hops, nodeIdToLayerId]);
+  // Watched-hit ids come from the per-hop meta the HopCards report up.
+  const watchedHitIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const h of hops) if ((hopMeta[h.id]?.watchHits ?? 0) > 0) s.add(h.id);
+    return s;
+  }, [hops, hopMeta]);
+  const colorContext: ColorContext = useMemo(
+    () => ({ layerNameById, watchedHitIds }),
+    [layerNameById, watchedHitIds],
+  );
+  const colorById = useMemo(() => {
+    const m = new Map<string, string | null>();
+    if (colorBy === "none") return m;
+    for (const h of hops) m.set(h.id, colorForNode(colorBy, h, colorContext));
+    return m;
+  }, [colorBy, hops, colorContext]);
+  const legend: LegendEntry[] = useMemo(
+    () => buildLegend(colorBy, hops, colorContext),
+    [colorBy, hops, colorContext],
+  );
 
   // Feature 26: parse predicate + per-hop match (uses reported error meta).
   const predicate = useMemo(() => parsePredicate(predicateStr), [predicateStr]);
@@ -2090,6 +2242,20 @@ export default function TraceView({ accessToken }: TraceViewProps) {
     });
   };
 
+  // Feature 49: build the current trace as a Markdown "trace note".
+  const buildTraceNote = (): string =>
+    traceToMarkdown(focusNode, hops, direction);
+  const copyTraceNote = () => {
+    void navigator.clipboard.writeText(buildTraceNote()).then(() => {
+      setNoteCopied(true);
+      window.setTimeout(() => setNoteCopied(false), 1800);
+    });
+  };
+  const downloadTraceNote = () => {
+    downloadMarkdown(buildTraceNote(), `trace-${slugify(focusNode.name)}`);
+    setNoteMenuOpen(false);
+  };
+
   // Classify each hop for fold/mute rendering. Path mode renders all hops raw.
   type HopClass = "full" | "folded" | "muted";
   const classify = (n: GraphNode): HopClass => {
@@ -2171,6 +2337,7 @@ export default function TraceView({ accessToken }: TraceViewProps) {
         scrollToLine={scrollToLine}
         onCitation={onCitation}
         buildSubtreeContext={buildSubtreeContext}
+        colorOverride={colorBy === "none" ? null : (colorById.get(node.id) ?? null)}
       />
     );
   };
@@ -2238,6 +2405,26 @@ export default function TraceView({ accessToken }: TraceViewProps) {
             searchResults={graph.nodes}
             onPickPathTarget={(id) => setPathTarget(id)}
           />
+          {/* Feature 44: color-by legend */}
+          {legend.length > 0 && (
+            <div
+              data-testid="color-legend"
+              className="mt-1.5 flex items-center gap-2 flex-wrap rounded border border-border-subtle/60 bg-surface/40 px-2 py-1"
+            >
+              <span className="text-[9px] uppercase tracking-wider text-text-muted">
+                {colorBy}
+              </span>
+              {legend.map((e) => (
+                <span key={e.label} className="inline-flex items-center gap-1 text-[10px] text-text-secondary">
+                  <span
+                    className="inline-block w-2.5 h-2.5 rounded-full border border-border-subtle"
+                    style={{ backgroundColor: e.color }}
+                  />
+                  <span className="font-mono truncate max-w-[10rem]" title={e.label}>{e.label}</span>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Wave-3 debug toolbar */}
@@ -2324,6 +2511,76 @@ export default function TraceView({ accessToken }: TraceViewProps) {
           />
         </div>
 
+        {/* Feature 48: Tours panel — list saved tours, replay (re-root + step),
+            delete, with a "stale" badge when a hop id is missing from the graph. */}
+        {toursPanelOpen && (
+          <div className="mb-2" data-testid="tours-panel">
+            <div className="rounded-lg border border-accent/30 bg-surface/60 p-2.5">
+              <div className="text-[10px] uppercase tracking-wider text-accent mb-1.5">
+                🎞 Saved tours ({tours.length}) — persists in workspace
+              </div>
+              {tours.length === 0 ? (
+                <div className="text-[11px] text-text-muted">
+                  No tours yet. Use “💾 Save as tour” to capture the current trace.
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  {tours.map((tour) => {
+                    const missing = tour.hopIds.filter((id) => !nodesById.has(id));
+                    const stale = missing.length > 0;
+                    return (
+                      <div
+                        key={tour.id}
+                        data-testid="tour-row"
+                        className="flex items-center gap-2 rounded border border-border-subtle bg-elevated/40 px-2.5 py-1.5"
+                      >
+                        <span className="text-[12px] font-mono text-text-primary truncate flex-1" title={tour.name}>
+                          {tour.name}
+                        </span>
+                        <span className="text-[9px] text-text-muted shrink-0">
+                          {tour.hopIds.length} hop{tour.hopIds.length === 1 ? "" : "s"}
+                        </span>
+                        {stale && (
+                          <span
+                            data-testid="tour-stale"
+                            className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-[rgb(251,191,36)]/60 text-[rgb(251,191,36)] bg-[rgb(251,191,36)]/10 shrink-0"
+                            title={`${missing.length} hop id(s) missing from the current graph`}
+                          >
+                            stale ({missing.length})
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          data-testid="tour-replay"
+                          onClick={() => {
+                            const present = tour.hopIds.filter((id) => nodesById.has(id));
+                            if (present.length === 0) return;
+                            setTraceRoot(present[0]);
+                            for (const id of present.slice(1)) pushTraceFn(id);
+                          }}
+                          className="text-[10px] font-semibold text-accent hover:text-accent-bright shrink-0"
+                          title="Replay: re-root at the first hop and step through the rest"
+                        >
+                          ▶ replay
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="tour-delete"
+                          onClick={() => removeTour(tour.id)}
+                          className="text-[10px] text-text-muted hover:text-node-concept shrink-0"
+                          title="Delete tour"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="min-w-0">
             <div className="text-base font-heading text-text-primary truncate" title={focusNode.name}>
@@ -2361,16 +2618,65 @@ export default function TraceView({ accessToken }: TraceViewProps) {
             </button>
             <button
               type="button"
+              data-testid="save-as-tour"
               onClick={() => {
                 saveTour(focusNode.name, hops.map((h) => h.id));
                 setTourSaved(true);
+                setToursPanelOpen(true);
                 window.setTimeout(() => setTourSaved(false), 1800);
               }}
               className="text-[10px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded border border-border-subtle text-text-muted hover:text-text-primary hover:border-border-medium transition-colors"
-              title="Save this trace as a tour (persists across restarts)"
+              title="Save this trace's ordered hops as a replayable tour (persists across restarts)"
             >
-              {tourSaved ? "Saved ✓" : "Save tour"}
+              {tourSaved ? "Saved ✓" : "💾 Save as tour"}
             </button>
+            <button
+              type="button"
+              data-testid="tours-toggle"
+              onClick={() => setToursPanelOpen((v) => !v)}
+              className={`text-[10px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded border transition-colors ${
+                toursPanelOpen
+                  ? "border-accent/60 text-accent bg-accent/10"
+                  : "border-border-subtle text-text-muted hover:text-text-primary hover:border-border-medium"
+              }`}
+              title="Show saved tours (replay / delete)"
+            >
+              🎞 Tours{tours.length > 0 ? ` (${tours.length})` : ""}
+            </button>
+            <div className="relative">
+              <button
+                type="button"
+                data-testid="export-note"
+                onClick={() => setNoteMenuOpen((v) => !v)}
+                className="text-[10px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded border border-border-subtle text-text-muted hover:text-text-primary hover:border-border-medium transition-colors"
+                title="Export this trace as a Markdown trace note"
+              >
+                ↧ Export note
+              </button>
+              {noteMenuOpen && (
+                <div className="absolute right-0 top-full mt-1 w-44 rounded-lg border border-border-subtle bg-surface shadow-xl z-50 overflow-hidden">
+                  <button
+                    type="button"
+                    data-testid="export-note-copy"
+                    onClick={() => {
+                      copyTraceNote();
+                      setNoteMenuOpen(false);
+                    }}
+                    className="w-full text-left text-[11px] px-3 py-2 text-text-primary hover:bg-elevated transition-colors"
+                  >
+                    {noteCopied ? "Copied ✓" : "Copy markdown"}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="export-note-download"
+                    onClick={downloadTraceNote}
+                    className="w-full text-left text-[11px] px-3 py-2 text-text-primary hover:bg-elevated transition-colors border-t border-border-subtle"
+                  >
+                    Download .md
+                  </button>
+                </div>
+              )}
+            </div>
             <button
               type="button"
               data-testid="snapshot-trace"

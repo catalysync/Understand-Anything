@@ -5,6 +5,7 @@
 import { useMemo, useState } from "react";
 import { useDashboardStore } from "../store";
 import { packageLabel } from "./traceGraph";
+import { COLOR_DIMENSIONS, type ColorDimension } from "./traceColor";
 import type { GraphNode } from "@understand-anything/core/types";
 
 const btnBase =
@@ -36,6 +37,8 @@ export default function TraceControls({
   const toggleCriticalPath = useDashboardStore((s) => s.toggleCriticalPath);
   const pathTarget = useDashboardStore((s) => s.tracePathTarget);
   const setPathTarget = useDashboardStore((s) => s.setPathTarget);
+  const colorBy = useDashboardStore((s) => s.traceColorBy);
+  const setColorBy = useDashboardStore((s) => s.setTraceColorBy);
 
   const [foldDraft, setFoldDraft] = useState("");
   const [muteOpen, setMuteOpen] = useState(false);
@@ -107,6 +110,24 @@ export default function TraceControls({
               {l}
             </button>
           ))}
+        </div>
+
+        {/* Wave-5 feature 44: Color-by dimension */}
+        <div className="flex items-center gap-1.5 px-2 py-1 rounded border border-border-subtle">
+          <span className="text-[10px] uppercase tracking-wider text-text-muted">Color by</span>
+          <select
+            data-testid="color-by-select"
+            value={colorBy}
+            onChange={(e) => setColorBy(e.target.value as ColorDimension)}
+            className="bg-surface text-text-primary text-[11px] rounded px-1.5 py-0.5 border border-border-subtle focus:outline-none focus:border-accent/50"
+            title="Recolor each hop rail/badge by a dimension"
+          >
+            {COLOR_DIMENSIONS.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.label}
+              </option>
+            ))}
+          </select>
         </div>
 
         {/* Critical path */}

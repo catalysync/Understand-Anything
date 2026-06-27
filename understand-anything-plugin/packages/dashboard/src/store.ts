@@ -8,6 +8,7 @@ import type {
   TourStep,
 } from "@understand-anything/core/types";
 import type { ReactFlowInstance } from "@xyflow/react";
+import type { ColorDimension } from "./components/traceColor";
 
 export type Persona = "non-technical" | "junior" | "experienced";
 /** Wave-4 feature 37b: answer-detail level for claude -p explanations. */
@@ -321,6 +322,9 @@ interface DashboardStore {
   /** "Path to…" target node id (path-between-two-nodes mode). */
   tracePathTarget: string | null;
   setPathTarget: (id: string | null) => void;
+  /** Wave-5 feature 44: the "Color by:" dimension for hop rails/badges. */
+  traceColorBy: ColorDimension;
+  setTraceColorBy: (dim: ColorDimension) => void;
 
   // ---- Wave-3 interactive-debugging UI state ---------------------------
   /** Feature 26: conditional-highlight predicate string (empty = off). */
@@ -930,6 +934,8 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   toggleCriticalPath: () => set((s) => ({ traceCriticalPath: !s.traceCriticalPath })),
   tracePathTarget: null,
   setPathTarget: (id) => set({ tracePathTarget: id }),
+  traceColorBy: "none",
+  setTraceColorBy: (dim) => set({ traceColorBy: dim }),
 
   // ---- Wave-3 interactive-debugging UI state ---------------------------
   tracePredicate: "",
