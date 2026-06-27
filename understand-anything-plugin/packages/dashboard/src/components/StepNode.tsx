@@ -2,6 +2,7 @@ import { memo } from "react";
 import { Handle, Position } from "@xyflow/react";
 import type { Node, NodeProps } from "@xyflow/react";
 import { useDashboardStore } from "../store";
+import { useDiffOverlay } from "../hooks/useDiffOverlay";
 
 export interface StepNodeData extends Record<string, unknown> {
   label: string;
@@ -23,10 +24,20 @@ function StepNode({ data }: NodeProps<StepFlowNode>) {
   const openStepFile = useDashboardStore((s) => s.openStepFile);
   const traceStepCode = useDashboardStore((s) => s.traceStepCode);
   const isSelected = selectedNodeId === data.stepId;
+  // Item 196: project the shared PR diff-overlay onto this domain step (by id
+  // or its file). Lights up steps whose code changed, same as structural/trace.
+  const diffStatus = useDiffOverlay(data.stepId, data.filePath);
 
   // Feature 110/105: is the step's file present in the structural graph?
   const fileResolved = !!(data.filePath && filePathToNodeId.has(data.filePath));
   const fileMissing = !!data.filePath && !fileResolved;
+
+  const diffBorder =
+    diffStatus === "changed"
+      ? "!border-[var(--color-diff-changed)]"
+      : diffStatus === "affected"
+        ? "!border-[var(--color-diff-affected)]"
+        : "";
 
   return (
     <div
@@ -34,7 +45,7 @@ function StepNode({ data }: NodeProps<StepFlowNode>) {
         isSelected
           ? "border-accent bg-accent/10"
           : "border-border-subtle bg-elevated hover:border-accent/40"
-      } ${data.dimmed ? "opacity-25" : ""}`}
+      } ${diffBorder} ${data.dimmed ? "opacity-25" : ""}`}
       onClick={() => selectNode(data.stepId)}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -51,6 +62,24 @@ function StepNode({ data }: NodeProps<StepFlowNode>) {
         <span className="text-[11px] font-medium text-text-primary truncate">
           {data.label}
         </span>
+        {diffStatus && (
+          <span
+            className="ml-auto shrink-0 text-[8px] font-semibold uppercase tracking-wider px-1 py-0.5 rounded"
+            style={{
+              color:
+                diffStatus === "changed"
+                  ? "var(--color-diff-changed)"
+                  : "var(--color-diff-affected)",
+              backgroundColor:
+                diffStatus === "changed"
+                  ? "var(--color-diff-changed-dim)"
+                  : "color-mix(in srgb, var(--color-diff-affected) 12%, transparent)",
+            }}
+            title={`This file is ${diffStatus} in the diff`}
+          >
+            Δ
+          </span>
+        )}
       </div>
       <div className="text-[10px] text-text-secondary line-clamp-2">
         {data.summary}

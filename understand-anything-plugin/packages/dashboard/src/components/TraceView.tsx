@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useDashboardStore } from "../store";
 import type { ContextChip, TraceLevel } from "../store";
+import { useDiffOverlay } from "../hooks/useDiffOverlay";
 import CodeBlock from "./CodeBlock";
 import { useExplain, fetchGhost, resolveCitation } from "./useCodeAssist";
 import type { ExplainState } from "./useCodeAssist";
@@ -520,6 +521,11 @@ function HopCardInner({
   const color = nodeColorVar(node.type);
   const setTraceRoot = useDashboardStore((s) => s.setTraceRoot);
   const startTraceAt = useDashboardStore((s) => s.startTraceAt);
+  // Item 190: is this hop covered by a domain step? → "part of: <flow>" chip.
+  const domainStepRef = useDashboardStore((s) => s.nodeIdToDomainStep.get(node.id));
+  const navigateToDomain = useDashboardStore((s) => s.navigateToDomain);
+  // Item 196: project the PR diff-overlay onto this trace hop.
+  const prDiffStatus = useDiffOverlay(node.id, node.filePath);
   const bundles = useMemo(() => bundleCalleesByPackage(graph, node.id), [graph, node.id]);
   const callers = useMemo(() => callersOf(graph, node.id), [graph, node.id]);
   const refs = useMemo(() => referencesOf(graph, node.id), [graph, node.id]);
@@ -819,7 +825,50 @@ function HopCardInner({
                   ↕ moved
                 </span>
               )}
+              {/* Item 196: PR diff overlay projected onto this hop. */}
+              {prDiffStatus && (
+                <span
+                  data-testid="hop-pr-diff-badge"
+                  className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border shrink-0"
+                  style={{
+                    color:
+                      prDiffStatus === "changed"
+                        ? "var(--color-diff-changed)"
+                        : "var(--color-diff-affected)",
+                    borderColor:
+                      prDiffStatus === "changed"
+                        ? "var(--color-diff-changed)"
+                        : "var(--color-diff-affected)",
+                    backgroundColor:
+                      prDiffStatus === "changed"
+                        ? "var(--color-diff-changed-dim)"
+                        : "transparent",
+                  }}
+                  title={`This file is ${prDiffStatus} in the diff`}
+                >
+                  Δ {prDiffStatus}
+                </span>
+              )}
             </div>
+            {/* Item 190: "part of: <flow>" chip → jumps into the domain view. */}
+            {domainStepRef && (
+              <button
+                type="button"
+                data-testid="hop-domain-chip"
+                onClick={() => {
+                  navigateToDomain(domainStepRef.domainId);
+                  useDashboardStore.getState().announce(
+                    `Now in Domain view, ${domainStepRef.flowName}`,
+                  );
+                  useDashboardStore.setState({ selectedNodeId: domainStepRef.stepId });
+                }}
+                className="mt-1 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full border border-node-pipeline/40 text-node-pipeline hover:bg-node-pipeline/10 transition-colors max-w-full"
+                title={`Part of the "${domainStepRef.flowName}" flow — open in domain view`}
+              >
+                <span className="opacity-70">part of:</span>
+                <span className="truncate font-medium">{domainStepRef.flowName}</span>
+              </button>
+            )}
             {/* Feature 17: containment breadcrumb pkg › file › func */}
             <div
               data-testid="hop-breadcrumb"
@@ -1225,6 +1274,38 @@ function HopCardInner({
                   onCitation={onCitation}
                   level={traceLevel}
                   onLevel={setTraceLevel}
+                  nextHops={[
+                    {
+                      label: "Trace callers",
+                      title: "Re-root the trace here in caller direction",
+                      onClick: () => {
+                        useDashboardStore.getState().setTraceDirection("callers");
+                        startTraceAt(node.id);
+                      },
+                    },
+                    ...(domainStepRef
+                      ? [
+                          {
+                            label: "See in domain",
+                            title: `Open the "${domainStepRef.flowName}" flow`,
+                            onClick: () => {
+                              navigateToDomain(domainStepRef.domainId);
+                              useDashboardStore.setState({
+                                selectedNodeId: domainStepRef.stepId,
+                              });
+                            },
+                          },
+                        ]
+                      : []),
+                    {
+                      label: "Open in graph",
+                      title: "Show this node in the structural graph",
+                      onClick: () =>
+                        useDashboardStore
+                          .getState()
+                          .focusEntity(node.id, { view: "structural" }),
+                    },
+                  ]}
                 />
               )}
             </div>

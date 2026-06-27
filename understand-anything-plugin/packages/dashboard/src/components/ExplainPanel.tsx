@@ -4,6 +4,13 @@ import type { Affordances, ExplainState } from "./useCodeAssist";
 import { SLASH_VERBS, expandSlashVerb } from "./useCodeAssist";
 import type { TraceLevel } from "../store";
 
+/** Item 193: a contextual next-hop jump chip shown under an explanation. */
+export interface NextHop {
+  label: string;
+  onClick: () => void;
+  title?: string;
+}
+
 interface ExplainPanelProps {
   state: ExplainState;
   title: string;
@@ -15,6 +22,8 @@ interface ExplainPanelProps {
   /** Feature 37b: current answer-detail level + setter (omit to hide the toggle). */
   level?: TraceLevel;
   onLevel?: (level: TraceLevel) => void;
+  /** Item 193: contextual jump chips derived from the focused node. */
+  nextHops?: NextHop[];
 }
 
 function Shimmer({ label }: { label: string }) {
@@ -101,6 +110,7 @@ export default function ExplainPanel({
   onCitation,
   level,
   onLevel,
+  nextHops,
 }: ExplainPanelProps) {
   const [draft, setDraft] = useState("");
   const [showSlash, setShowSlash] = useState(false);
@@ -168,6 +178,26 @@ export default function ExplainPanel({
       {state.status === "loaded" && state.explanation && (
         <>
           <BookProse>{state.explanation}</BookProse>
+
+          {/* Item 193: contextual next-hop jump chips (trace callers / see in
+              domain / open in graph), derived from the focused node. */}
+          {nextHops && nextHops.length > 0 && (
+            <div className="mt-2.5 flex flex-wrap items-center gap-1.5" data-testid="next-hops">
+              <span className="text-[9px] uppercase tracking-wider text-text-muted">Next</span>
+              {nextHops.map((hop, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  data-testid="next-hop-chip"
+                  onClick={hop.onClick}
+                  title={hop.title}
+                  className="text-[10.5px] px-2 py-0.5 rounded-full border border-accent/40 text-accent hover:text-accent-bright hover:border-accent/70 hover:bg-accent/5 transition-colors"
+                >
+                  {hop.label}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Citations + suggested chips for the initial answer (only when no
               follow-up thread has superseded them). */}

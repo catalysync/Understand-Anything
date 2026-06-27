@@ -22,6 +22,8 @@ import JumpActions from "./components/JumpActions";
 import StartHereSpotlight from "./components/StartHereSpotlight";
 import ResumeBanner from "./components/ResumeBanner";
 import LanguageAxisToggle from "./components/LanguageAxisToggle";
+import WhatChangedPanel from "./components/WhatChangedPanel";
+import ViewState from "./components/ViewState";
 import MobileLayout from "./components/MobileLayout";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
@@ -41,6 +43,7 @@ const KeyboardShortcutsHelp = lazy(
 );
 const OnboardingOverlay = lazy(() => import("./components/OnboardingOverlay"));
 const SymbolPalette = lazy(() => import("./components/SymbolPalette"));
+const SettingsModal = lazy(() => import("./components/SettingsModal"));
 
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
 const SESSION_TOKEN_KEY = "understand-anything-token";
@@ -298,6 +301,10 @@ function DashboardContent({
   const isKnowledgeGraph = useDashboardStore((s) => s.isKnowledgeGraph);
   const domainGraph = useDashboardStore((s) => s.domainGraph);
   const layoutIssues = useDashboardStore((s) => s.layoutIssues);
+  const settings = useDashboardStore((s) => s.settings);
+  const learningLoaded = useDashboardStore((s) => s.learningLoaded);
+  const ariaAnnouncement = useDashboardStore((s) => s.ariaAnnouncement);
+  const setSettingsModalOpen = useDashboardStore((s) => s.setSettingsModalOpen);
   const isMobile = useIsMobile();
   const { t } = useI18n();
   const allIssues = useMemo(
@@ -340,6 +347,28 @@ function DashboardContent({
         break;
     }
   }, [graph, onboardingGoal]);
+
+  // Item 200b: apply the persisted default landing view once, when the graph +
+  // settings are ready and no onboarding goal is steering the initial view.
+  const appliedLanding = useRef(false);
+  useEffect(() => {
+    if (appliedLanding.current) return;
+    if (!graph || !learningLoaded || isKnowledgeGraph) return;
+    if (onboardingGoal) {
+      // The goal-routing effect owns the initial view; don't fight it.
+      appliedLanding.current = true;
+      return;
+    }
+    const target = settings.defaultLandingView;
+    if (target && target !== "auto") {
+      if (target === "domain" && !domainGraph) {
+        appliedLanding.current = true;
+        return;
+      }
+      useDashboardStore.getState().setViewMode(target, { keepSelection: false });
+    }
+    appliedLanding.current = true;
+  }, [graph, learningLoaded, isKnowledgeGraph, onboardingGoal, settings.defaultLandingView, domainGraph]);
 
   // Define keyboard shortcuts
   const shortcuts = useMemo<KeyboardShortcut[]>(
@@ -476,6 +505,35 @@ function DashboardContent({
         action: () => useDashboardStore.getState().toggleSymbolPalette(),
         category: "Navigation",
       },
+      // Item 200c: cross-view jump shortcuts.
+      {
+        key: "t",
+        description: "Trace focused node (or open Trace view)",
+        action: () => {
+          const state = useDashboardStore.getState();
+          if (state.selectedNodeId) state.startTraceAt(state.selectedNodeId);
+          else state.setViewMode("trace");
+        },
+        category: "Navigation",
+      },
+      {
+        key: "g",
+        description: "Go to the structural graph",
+        action: () => {
+          const state = useDashboardStore.getState();
+          if (state.selectedNodeId)
+            state.focusEntity(state.selectedNodeId, { view: "structural" });
+          else state.setViewMode("structural");
+        },
+        category: "Navigation",
+      },
+      {
+        key: ",",
+        metaKey: true,
+        description: "Open settings",
+        action: () => useDashboardStore.getState().setSettingsModalOpen(true),
+        category: "General",
+      },
     ],
     [t]
   );
@@ -600,6 +658,8 @@ function DashboardContent({
         <div className="flex-1 min-w-0 overflow-x-auto scrollbar-hide">
           <div className="flex items-center gap-4 w-max">
             <DiffToggle />
+            {/* Item 197: "What changed" cross-view summary (shows only in diff mode). */}
+            <WhatChangedPanel />
             {/* Detail level: file view (architecture) / class view (code structure) */}
             {!isKnowledgeGraph && viewMode !== "domain" && (
               <>
@@ -789,6 +849,24 @@ function DashboardContent({
             <span className="hidden md:inline">{t.common.path}</span>
           </button>
           <ThemePicker />
+          {/* Item 200b: Settings modal entry point. */}
+          <button
+            onClick={() => setSettingsModalOpen(true)}
+            className="text-text-muted hover:text-accent transition-colors"
+            title="Settings (⌘,)"
+            data-testid="open-settings"
+            aria-label="Open settings"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+              />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
           <button
             onClick={() => setShowKeyboardHelp(true)}
             className="text-text-muted hover:text-accent transition-colors"
@@ -833,7 +911,9 @@ function DashboardContent({
       <div className="flex-1 flex min-h-0 relative">
         {/* Graph area */}
         <div className="flex-1 min-w-0 min-h-0 relative">
-          {viewMode === "trace" ? (
+          {!graph && !loadError ? (
+            <ViewState kind="loading" message="Loading the knowledge graph…" />
+          ) : viewMode === "trace" ? (
             <Suspense fallback={null}>
               <TraceView accessToken={accessToken} />
             </Suspense>
@@ -841,6 +921,14 @@ function DashboardContent({
             <KnowledgeGraphView />
           ) : viewMode === "domain" && domainGraph ? (
             <DomainGraphView />
+          ) : viewMode === "domain" && !domainGraph ? (
+            <ViewState
+              kind="empty"
+              title="No domain graph yet"
+              message="Run /understand-domain to extract business flows for this project, then reload."
+              onRetry={() => setViewMode("structural")}
+              retryLabel="Back to structural"
+            />
           ) : (
             <GraphView />
           )}
@@ -919,6 +1007,24 @@ function DashboardContent({
       <Suspense fallback={null}>
         <SymbolPalette />
       </Suspense>
+
+      {/* Item 200b: consolidated Settings modal (persona/theme/landing/trace defaults). */}
+      <Suspense fallback={null}>
+        <SettingsModal />
+      </Suspense>
+
+      {/* K3: shared node context menu (Trace · Explain · Show-in-domain · …). */}
+      <JumpActions />
+
+      {/* Item 200c: ARIA live region announcing view / selection changes. */}
+      <div
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+        data-testid="aria-live"
+      >
+        {ariaAnnouncement}
+      </div>
     </div>
   );
 }

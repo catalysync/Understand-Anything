@@ -16,8 +16,38 @@ import {
   loadLearning,
   saveLearning,
 } from "./utils/learningPersist";
+import {
+  type AppSettings,
+  type DestinationsState,
+  type PinnedEntity,
+  type RecentEntity,
+  DEFAULT_SETTINGS,
+  EMPTY_DESTINATIONS,
+  loadSettings,
+  saveSettings,
+  loadDestinations,
+  saveDestinations,
+  pushRecent,
+  togglePinned as togglePinnedDest,
+} from "./utils/settingsPersist";
 
 export type { OnboardingGoal };
+export type { AppSettings, RecentEntity, PinnedEntity };
+
+/**
+ * Item 190: a structural node id resolved (via shared filePath) to the domain
+ * step that covers it, plus the flow + domain it belongs to. Mirrors
+ * nodeIdToLayerId — built once when the domain graph loads — so any trace hop /
+ * structural node can show a "part of: <flow>" chip linking into the domain.
+ */
+export interface DomainStepRef {
+  stepId: string;
+  stepName: string;
+  flowId: string;
+  flowName: string;
+  domainId: string;
+  domainName: string;
+}
 
 export type Persona = "non-technical" | "junior" | "experienced";
 /** Wave-4 feature 37b: answer-detail level for claude -p explanations. */
@@ -156,8 +186,55 @@ function buildGraphIndexes(graph: KnowledgeGraph): {
   return { nodesById, nodeIdToLayerId, nodeIdToLayerIds, filePathToNodeId };
 }
 
+/**
+ * Item 190: build (structural node id → domain step) by joining the domain
+ * graph's steps (which carry a filePath) to the structural graph via
+ * filePathToNodeId. A structural node/trace hop in a file claimed by a domain
+ * step gets a "part of: <flow>" reference. First-step-per-file wins.
+ */
+function buildNodeIdToDomainStep(
+  domainGraph: KnowledgeGraph | null,
+  filePathToNodeId: Map<string, string>,
+): Map<string, DomainStepRef> {
+  const index = new Map<string, DomainStepRef>();
+  if (!domainGraph) return index;
+
+  const byId = new Map(domainGraph.nodes.map((n) => [n.id, n] as const));
+  // step id → flow id (via flow_step), flow id → domain id (via contains_flow).
+  const stepToFlow = new Map<string, string>();
+  const flowToDomain = new Map<string, string>();
+  for (const e of domainGraph.edges) {
+    if (e.type === "flow_step") stepToFlow.set(e.target, e.source);
+    else if (e.type === "contains_flow") flowToDomain.set(e.target, e.source);
+  }
+
+  for (const node of domainGraph.nodes) {
+    if (node.type !== "step" || !node.filePath) continue;
+    const structuralId = filePathToNodeId.get(node.filePath);
+    if (!structuralId || index.has(structuralId)) continue;
+    const flowId = stepToFlow.get(node.id);
+    if (!flowId) continue;
+    const domainId = flowToDomain.get(flowId);
+    if (!domainId) continue;
+    const flow = byId.get(flowId);
+    const domain = byId.get(domainId);
+    index.set(structuralId, {
+      stepId: node.id,
+      stepName: node.name,
+      flowId,
+      flowName: flow?.name ?? "flow",
+      domainId,
+      domainName: domain?.name ?? "domain",
+    });
+  }
+  return index;
+}
+
 /** Maximum number of entries in the sidebar navigation history. */
 const MAX_HISTORY = 50;
+
+/** Project key used to namespace localStorage settings + destinations. */
+let settingsProjectKey = "default";
 
 // ---------------------------------------------------------------------------
 // Workspace persistence (bookmarks, annotations, node→session map, watches,
@@ -244,6 +321,8 @@ interface DashboardStore {
   nodeIdToLayerIds: Map<string, Set<string>>;
   /** Domain features 110/105/123: source filePath → structural node id (file-node preferred). */
   filePathToNodeId: Map<string, string>;
+  /** Item 190: structural node id → the domain step covering it (built when the domain graph loads). */
+  nodeIdToDomainStep: Map<string, DomainStepRef>;
   selectedNodeId: string | null;
   searchQuery: string;
   searchResults: SearchResult[];
@@ -526,6 +605,36 @@ interface DashboardStore {
   openContextMenu: (nodeId: string, x: number, y: number) => void;
   closeContextMenu: () => void;
 
+  // ---- Integration / app-wide-polish state (items 187/200b/200c) ----------
+  /** Item 187: recently-focused entities + pinned destinations (palette header). */
+  destinations: DestinationsState;
+  /** Item 187: record a focused entity into recents (persisted to localStorage). */
+  recordRecent: (nodeId: string) => void;
+  /** Item 187: pin / unpin a destination. */
+  togglePinnedDestination: (nodeId: string) => void;
+  isPinnedDestination: (nodeId: string) => boolean;
+
+  /** Item 200b: app-wide settings (default landing view + trace defaults). */
+  settings: AppSettings;
+  settingsModalOpen: boolean;
+  setSettingsModalOpen: (open: boolean) => void;
+  updateSettings: (patch: Partial<AppSettings>) => void;
+
+  /** Item 200c: ARIA live-region message announcing view/selection changes. */
+  ariaAnnouncement: string;
+  announce: (message: string) => void;
+
+  /**
+   * Item 186: route a federated search result to its best view. `kind` is the
+   * resolved RouteKind (trace/domain/structural/code); `domainId` is required
+   * for domain routing of a flow/step (the domain to enter first).
+   */
+  openSearchResult: (
+    nodeId: string,
+    kind: "trace" | "domain" | "structural" | "code",
+    domainId?: string,
+  ) => void;
+
   // Container expand/collapse + lazy layout caches
   expandedContainers: Set<string>;
   toggleContainer: (containerId: string) => void;
@@ -680,6 +789,7 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   nodeIdToLayerId: new Map<string, string>(),
   nodeIdToLayerIds: new Map<string, Set<string>>(),
   filePathToNodeId: new Map<string, string>(),
+  nodeIdToDomainStep: new Map<string, DomainStepRef>(),
   selectedNodeId: null,
   searchQuery: "",
   searchResults: [],
@@ -859,6 +969,9 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       nodeIdToLayerId,
       nodeIdToLayerIds,
       filePathToNodeId,
+      // Item 190: rebuild the domain-step index against the new structural index
+      // (no-op if the domain graph hasn't loaded yet; setDomainGraph rebuilds it).
+      nodeIdToDomainStep: buildNodeIdToDomainStep(domainGraph, filePathToNodeId),
       searchEngine,
       searchResults,
       navigationLevel: "overview",
@@ -1309,6 +1422,11 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     // Items 158/161: a trace counts toward coverage + checks the "traced" box.
     get().markVisited(id);
     get().markChecklist("didTrace");
+    // Item 187: record the trace target as a recent destination.
+    get().recordRecent(id);
+    // Item 200c: announce the trace for screen readers.
+    const node = get().graph?.nodes.find((n) => n.id === id);
+    if (node) get().announce(`Now in Trace view, tracing from ${node.name}`);
   },
 
   // ---- Workspace persistence -------------------------------------------
@@ -1409,7 +1527,20 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
 
   loadLearning: (projectKey) => {
     learningProjectKey = projectKey || "default";
-    set({ learning: loadLearning(learningProjectKey), learningLoaded: true });
+    // Items 187/200b: hydrate settings + recent/pinned destinations for the same
+    // project key (localStorage — they're outside the workspace whitelist).
+    settingsProjectKey = learningProjectKey;
+    const settings = loadSettings(settingsProjectKey);
+    const destinations = loadDestinations(settingsProjectKey);
+    set({
+      learning: loadLearning(learningProjectKey),
+      learningLoaded: true,
+      settings,
+      destinations,
+      // Apply persisted trace defaults at load.
+      traceDepth: Math.max(1, Math.min(6, settings.defaultTraceDepth)),
+      traceDirection: settings.defaultTraceDirection,
+    });
   },
 
   setOnboardingGoal: (goal) =>
@@ -1479,7 +1610,13 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   clearContextChips: () => set({ contextChips: [] }),
 
   setDomainGraph: (graph) => {
-    set({ domainGraph: graph });
+    // Item 190: (re)build the structural-node → domain-step index now that we
+    // have both graphs available (filePathToNodeId was built by setGraph).
+    const { filePathToNodeId } = get();
+    set({
+      domainGraph: graph,
+      nodeIdToDomainStep: buildNodeIdToDomainStep(graph, filePathToNodeId),
+    });
   },
 
   setIsKnowledgeGraph: (value) => {
@@ -1490,11 +1627,21 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     const keepSelection = opts?.keepSelection ?? true;
     const { selectedNodeId, traceRoot, nodeIdToLayerId } = get();
     // Always close the code viewer when switching the top-level view.
+    // Item 200c: announce the view change for screen readers.
+    const viewLabel =
+      mode === "structural"
+        ? "Structural graph"
+        : mode === "domain"
+          ? "Domain flows"
+          : mode === "trace"
+            ? "Trace view"
+            : "Knowledge graph";
     const base = {
       viewMode: mode,
       codeViewerOpen: false,
       codeViewerNodeId: null,
       codeViewerExpanded: false,
+      ariaAnnouncement: `Now in ${viewLabel}`,
     };
     if (!keepSelection || !selectedNodeId) {
       set({ ...base, selectedNodeId: null, focusNodeId: null });
@@ -1526,6 +1673,13 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
 
   focusEntity: (nodeId, opts) => {
     const view = opts?.view ?? get().viewMode;
+    // Item 187: every focus records a recent destination.
+    get().recordRecent(nodeId);
+    // Item 200c: announce the cross-view jump for screen readers.
+    const node =
+      get().graph?.nodes.find((n) => n.id === nodeId) ??
+      get().domainGraph?.nodes.find((n) => n.id === nodeId);
+    if (node) get().announce(`Now in ${view} view, focused on ${node.name}`);
     if (view === "trace") {
       get().startTraceAt(nodeId);
     } else if (view === "domain") {
@@ -1542,6 +1696,80 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   contextMenu: null,
   openContextMenu: (nodeId, x, y) => set({ contextMenu: { nodeId, x, y } }),
   closeContextMenu: () => set({ contextMenu: null }),
+
+  // ---- Integration / app-wide-polish (items 187/200b/200c) ---------------
+  destinations: { ...EMPTY_DESTINATIONS },
+  recordRecent: (nodeId) => {
+    const { graph, domainGraph, destinations } = get();
+    const node =
+      graph?.nodes.find((n) => n.id === nodeId) ??
+      domainGraph?.nodes.find((n) => n.id === nodeId);
+    if (!node) return;
+    const entry: RecentEntity = {
+      nodeId,
+      name: node.name,
+      type: node.type,
+      at: Date.now(),
+    };
+    const next = pushRecent(destinations, entry);
+    saveDestinations(settingsProjectKey, next);
+    set({ destinations: next });
+  },
+  togglePinnedDestination: (nodeId) => {
+    const { graph, domainGraph, destinations } = get();
+    const node =
+      graph?.nodes.find((n) => n.id === nodeId) ??
+      domainGraph?.nodes.find((n) => n.id === nodeId);
+    if (!node) return;
+    const next = togglePinnedDest(destinations, {
+      nodeId,
+      name: node.name,
+      type: node.type,
+    });
+    saveDestinations(settingsProjectKey, next);
+    set({ destinations: next });
+  },
+  isPinnedDestination: (nodeId) =>
+    get().destinations.pinned.some((p) => p.nodeId === nodeId),
+
+  settings: { ...DEFAULT_SETTINGS },
+  settingsModalOpen: false,
+  setSettingsModalOpen: (open) => set({ settingsModalOpen: open }),
+  updateSettings: (patch) => {
+    const next = { ...get().settings, ...patch };
+    saveSettings(settingsProjectKey, next);
+    // Apply trace defaults live so the change is immediate, not just on reload.
+    const live: Partial<DashboardStore> = { settings: next };
+    if (patch.defaultTraceDepth !== undefined) {
+      live.traceDepth = Math.max(1, Math.min(6, patch.defaultTraceDepth));
+    }
+    if (patch.defaultTraceDirection !== undefined) {
+      live.traceDirection = patch.defaultTraceDirection;
+    }
+    set(live);
+  },
+
+  ariaAnnouncement: "",
+  announce: (message) => set({ ariaAnnouncement: message }),
+
+  openSearchResult: (nodeId, kind, domainId) => {
+    get().recordRecent(nodeId);
+    if (kind === "trace") {
+      get().startTraceAt(nodeId);
+    } else if (kind === "domain") {
+      // Enter the owning domain first, then select the flow/step node within it.
+      if (domainId) get().navigateToDomain(domainId);
+      set({ viewMode: "domain", selectedNodeId: nodeId });
+      const node = get().domainGraph?.nodes.find((n) => n.id === nodeId);
+      get().announce(`Now in Domain view${node ? `, focused on ${node.name}` : ""}`);
+    } else if (kind === "code") {
+      // Open the structural node + its source.
+      get().focusEntity(nodeId, { view: "structural" });
+      get().openCodeViewer(nodeId);
+    } else {
+      get().focusEntity(nodeId, { view: "structural" });
+    }
+  },
 
   navigateToDomain: (domainId) => {
     const { selectedNodeId, nodeHistory } = get();

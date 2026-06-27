@@ -1,6 +1,14 @@
 import { useCallback, useMemo, useState } from "react";
 import { useDashboardStore } from "../store";
 import type { GraphNode, KnowledgeGraph } from "@understand-anything/core/types";
+import {
+  abortInflightExplain,
+  explainCacheKey,
+  freshAbortController,
+  getCachedExplain,
+  isAbortError,
+  setCachedExplain,
+} from "./explainCache";
 
 /**
  * Shared helpers for the code-assist features used by CodeViewer and
@@ -205,11 +213,31 @@ export function useExplain(accessToken: string, nodeId?: string | null) {
         return;
       }
 
+      // Item 199: serve from the shared LRU cache when this exact range was
+      // already explained (in any view) — instant, no claude -p round-trip.
+      const cacheKey = explainCacheKey(filePath, start, end);
+      const cached = getCachedExplain(cacheKey);
+      if (cached) {
+        const { prose, affordances } = parseAnswer(cached.explanation);
+        setState({
+          ...IDLE,
+          status: "loaded",
+          explanation: prose,
+          line: anchorLine,
+          sessionId: cached.sessionId,
+          affordances,
+        });
+        return;
+      }
+
+      // Item 199: abort any prior in-flight explain (focus changed) and start fresh.
+      const controller = freshAbortController();
       setState({ ...IDLE, status: "loading", line: anchorLine });
       fetch("/explain.json", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: accessToken, path: filePath, start, end, ...opts }),
+        signal: controller.signal,
       })
         .then(async (res) => {
           const data = (await res.json()) as {
@@ -221,6 +249,10 @@ export function useExplain(accessToken: string, nodeId?: string | null) {
             throw new Error(data.error || "Failed to get explanation");
           }
           if (nodeId && data.session_id) setNodeSession(nodeId, data.session_id);
+          setCachedExplain(cacheKey, {
+            explanation: data.explanation,
+            sessionId: data.session_id ?? null,
+          });
           const { prose, affordances } = parseAnswer(data.explanation);
           setState({
             ...IDLE,
@@ -232,6 +264,8 @@ export function useExplain(accessToken: string, nodeId?: string | null) {
           });
         })
         .catch((err: unknown) => {
+          // Swallow aborts — a newer explain superseded this one.
+          if (isAbortError(err)) return;
           setState({
             ...IDLE,
             status: "error",
@@ -341,7 +375,13 @@ export function useExplain(accessToken: string, nodeId?: string | null) {
 
   const reset = useCallback(() => setState(IDLE), []);
 
-  return { state, explain, runMode, askFollowUp, reset };
+  // Item 199: cancel an in-flight explain (focus changed / panel closed).
+  const cancel = useCallback(() => {
+    abortInflightExplain();
+    setState(IDLE);
+  }, []);
+
+  return { state, explain, runMode, askFollowUp, reset, cancel };
 }
 
 /**
