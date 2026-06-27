@@ -1,15 +1,20 @@
-import { useEffect, useState } from "react";
-import { useI18n } from "../contexts/I18nContext";
+import { useEffect, useMemo, useState } from "react";
+import { useDashboardStore } from "../store";
+import type { OnboardingGoal } from "../store";
 
 /**
  * First-visit onboarding overlay (controlled).
  *
- * Parent owns the visibility + persistence state (see App.tsx). This component
- * only renders the modal and reports the user's intent via onDismiss:
- *   - onDismiss(true)  → "Skip" / Finish — parent should persist.
- *   - onDismiss(false) → backdrop click / Escape — parent should close without persisting.
+ * Items 131 + 132:
+ *   131 — cards are generated from the LOADED graph (project name, node/edge
+ *         counts, top layer, languages) instead of static i18n copy.
+ *   132 — a final "Pick your goal" card routes the user into the right initial
+ *         view by setting store.onboardingGoal (App.tsx reacts to it).
  *
- * Force-show is handled by the parent (see `shouldShowOnboarding` in App.tsx).
+ * Parent owns visibility + persistence (see App.tsx). This component reports
+ * intent via onDismiss:
+ *   - onDismiss(true)  → "Skip" / Finish — parent should persist.
+ *   - onDismiss(false) → backdrop click / Escape — close without persisting.
  */
 
 interface Props {
@@ -18,13 +23,104 @@ interface Props {
 
 const TITLE_ID = "ua-onboarding-title";
 
+interface Card {
+  tag: string;
+  title: string;
+  body: string;
+  hint?: string;
+}
+
+interface GoalOption {
+  id: OnboardingGoal;
+  label: string;
+  desc: string;
+  icon: string;
+}
+
+const GOALS: GoalOption[] = [
+  {
+    id: "architecture",
+    label: "Understand the architecture",
+    desc: "Start in the layered structural map of the whole system.",
+    icon: "◫",
+  },
+  {
+    id: "find",
+    label: "Find where X lives",
+    desc: "Jump straight into search to locate a file, type or symbol.",
+    icon: "⌕",
+  },
+  {
+    id: "role",
+    label: "Onboard to my role",
+    desc: "Take the guided tour built for this project.",
+    icon: "✦",
+  },
+  {
+    id: "exploring",
+    label: "Just exploring",
+    desc: "Open the project overview and roam freely.",
+    icon: "✣",
+  },
+];
+
 export default function OnboardingOverlay({ onDismiss }: Props) {
-  const { t } = useI18n();
-  const STEPS = t.onboarding.steps;
+  const graph = useDashboardStore((s) => s.graph);
+  const setOnboardingGoal = useDashboardStore((s) => s.setOnboardingGoal);
   const [stepIdx, setStepIdx] = useState(0);
 
-  // Capture-phase Escape handler — runs before the global keydown chain so we
-  // can stopPropagation() and prevent it from also firing.
+  // Item 131: derive cards from the actual graph once it's loaded.
+  const cards = useMemo<Card[]>(() => {
+    if (!graph) {
+      return [
+        {
+          tag: "Welcome",
+          title: "Understand Anything",
+          body: "Loading your project graph…",
+        },
+      ];
+    }
+    const { project, nodes, edges, layers } = graph;
+    const topLayer = [...layers].sort((a, b) => b.nodeIds.length - a.nodeIds.length)[0];
+    const langs = project.languages.length
+      ? project.languages.join(", ")
+      : "this codebase";
+    return [
+      {
+        tag: "Welcome",
+        title: project.name,
+        body:
+          project.description?.trim() ||
+          `An interactive map of ${project.name}, written in ${langs}.`,
+        hint: `${nodes.length.toLocaleString()} nodes · ${edges.length.toLocaleString()} relationships across ${layers.length} layers.`,
+      },
+      {
+        tag: "How it's organized",
+        title: topLayer
+          ? `${layers.length} layers — largest is "${topLayer.name}"`
+          : `${layers.length} architectural layers`,
+        body: topLayer
+          ? `${topLayer.name} holds ${topLayer.nodeIds.length.toLocaleString()} nodes${topLayer.description ? ` — ${topLayer.description}` : ""}. Each layer groups related files so you can read the system top-down.`
+          : "Nodes are grouped into logical layers so you can read the system top-down.",
+        hint: "Click any layer in the graph to drill in; press ? for shortcuts.",
+      },
+      {
+        tag: "Ways to learn",
+        title: "Tour, trace, and search",
+        body:
+          "Take the guided Tour to learn the codebase step-by-step, Trace a call chain from any node, or Search to jump straight to what you need.",
+        hint: graph.tour.length
+          ? `A ${graph.tour.length}-step guided tour is ready for this project.`
+          : "Use the structural map and search to navigate.",
+      },
+    ];
+  }, [graph]);
+
+  const lastCardIdx = cards.length; // the goal card sits after the info cards
+  const isGoalCard = stepIdx === lastCardIdx;
+  const total = cards.length + 1;
+
+  // Capture-phase Escape handler — runs before the global keydown chain.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -36,9 +132,13 @@ export default function OnboardingOverlay({ onDismiss }: Props) {
     return () => document.removeEventListener("keydown", handler, true);
   }, [onDismiss]);
 
+  const pickGoal = (goal: OnboardingGoal) => {
+    setOnboardingGoal(goal);
+    onDismiss(true);
+  };
+
+  const card = cards[Math.min(stepIdx, cards.length - 1)];
   const isFirst = stepIdx === 0;
-  const isLast = stepIdx === STEPS.length - 1;
-  const step = STEPS[stepIdx];
 
   return (
     <div
@@ -48,32 +148,65 @@ export default function OnboardingOverlay({ onDismiss }: Props) {
       }}
     >
       <style>{KEYFRAMES}</style>
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={TITLE_ID}
-        style={cardStyle}
-      >
+      <div role="dialog" aria-modal="true" aria-labelledby={TITLE_ID} style={cardStyle}>
         <div style={tagStyle}>
           <span style={numStyle}>0{stepIdx + 1}</span>
-          <span> / 0{STEPS.length}</span>
+          <span> / 0{total}</span>
           <span style={dotStyle} />
-          <span>{t.onboarding.header}</span>
+          <span>{isGoalCard ? "Pick your goal" : card.tag}</span>
         </div>
 
-        <h2 id={TITLE_ID} style={titleStyle}>
-          {step.title}
-        </h2>
-        <p style={bodyStyle}>{step.body}</p>
-        {step.hint && (
-          <blockquote style={hintStyle}>
-            <span style={{ color: "var(--color-accent)", marginRight: 8 }}>·</span>
-            {step.hint}
-          </blockquote>
+        {isGoalCard ? (
+          <>
+            <h2 id={TITLE_ID} style={titleStyle}>
+              What brings you here?
+            </h2>
+            <p style={bodyStyle}>
+              Pick a goal and we'll drop you in the right place. You can change
+              your mind at any time.
+            </p>
+            <div style={goalGridStyle}>
+              {GOALS.map((g) => (
+                <button
+                  key={g.id}
+                  type="button"
+                  onClick={() => pickGoal(g.id)}
+                  style={goalBtnStyle}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.borderColor = "var(--color-accent)";
+                    e.currentTarget.style.background = "var(--color-accent-overlay-bg)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.borderColor = "var(--color-border-medium)";
+                    e.currentTarget.style.background = "transparent";
+                  }}
+                >
+                  <span style={goalIconStyle}>{g.icon}</span>
+                  <span>
+                    <span style={goalLabelStyle}>{g.label}</span>
+                    <span style={goalDescStyle}>{g.desc}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <>
+            <h2 id={TITLE_ID} style={titleStyle}>
+              {card.title}
+            </h2>
+            <p style={bodyStyle}>{card.body}</p>
+            {card.hint && (
+              <blockquote style={hintStyle}>
+                <span style={{ color: "var(--color-accent)", marginRight: 8 }}>·</span>
+                {card.hint}
+              </blockquote>
+            )}
+          </>
         )}
 
         <div style={progressTrackStyle}>
-          {STEPS.map((_, i) => (
+          {Array.from({ length: total }).map((_, i) => (
             <div
               key={i}
               style={{
@@ -94,7 +227,7 @@ export default function OnboardingOverlay({ onDismiss }: Props) {
             onClick={() => onDismiss(true)}
             style={{ ...btnStyle, ...btnGhostStyle }}
           >
-            {t.onboarding.skipForever}
+            Skip
           </button>
           <div style={{ flex: 1 }} />
           {!isFirst && (
@@ -103,24 +236,16 @@ export default function OnboardingOverlay({ onDismiss }: Props) {
               onClick={() => setStepIdx(stepIdx - 1)}
               style={{ ...btnStyle, ...btnGhostStyle }}
             >
-              {t.onboarding.prev}
+              Back
             </button>
           )}
-          {!isLast ? (
+          {!isGoalCard && (
             <button
               type="button"
               onClick={() => setStepIdx(stepIdx + 1)}
               style={{ ...btnStyle, ...btnPrimaryStyle }}
             >
-              {t.onboarding.next}
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => onDismiss(true)}
-              style={{ ...btnStyle, ...btnPrimaryStyle }}
-            >
-              {t.onboarding.finish}
+              {stepIdx === cards.length - 1 ? "Choose a goal →" : "Next"}
             </button>
           )}
         </div>
@@ -209,6 +334,50 @@ const hintStyle: React.CSSProperties = {
   fontSize: "0.86rem",
   color: "var(--color-accent)",
   fontStyle: "italic",
+};
+
+const goalGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr",
+  gap: 10,
+  marginTop: 22,
+};
+
+const goalBtnStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 14,
+  width: "100%",
+  textAlign: "left",
+  padding: "12px 16px",
+  border: "1px solid var(--color-border-medium)",
+  background: "transparent",
+  color: "var(--color-text-primary)",
+  cursor: "pointer",
+  fontFamily: "inherit",
+  transition: "all 0.2s cubic-bezier(0.22, 1, 0.36, 1)",
+};
+
+const goalIconStyle: React.CSSProperties = {
+  fontSize: "1.2rem",
+  color: "var(--color-accent)",
+  width: 24,
+  textAlign: "center",
+  flexShrink: 0,
+};
+
+const goalLabelStyle: React.CSSProperties = {
+  display: "block",
+  fontSize: "0.95rem",
+  fontWeight: 500,
+  marginBottom: 2,
+};
+
+const goalDescStyle: React.CSSProperties = {
+  display: "block",
+  fontSize: "0.8rem",
+  color: "var(--color-text-muted)",
+  lineHeight: 1.4,
 };
 
 const progressTrackStyle: React.CSSProperties = {

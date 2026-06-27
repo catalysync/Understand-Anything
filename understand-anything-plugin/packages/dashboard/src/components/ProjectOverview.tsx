@@ -1,10 +1,28 @@
+import { useMemo, useState } from "react";
 import { useDashboardStore } from "../store";
 import { useI18n } from "../contexts/I18nContext";
+import CoverageRing from "./CoverageRing";
+import OnboardingChecklist from "./OnboardingChecklist";
+import GlossaryPanel from "./GlossaryPanel";
 
 export default function ProjectOverview() {
   const graph = useDashboardStore((s) => s.graph);
+  const domainGraph = useDashboardStore((s) => s.domainGraph);
   const startTour = useDashboardStore((s) => s.startTour);
+  const [glossaryOpen, setGlossaryOpen] = useState(false);
   const { t } = useI18n();
+
+  // Item 165: does the project have any glossary terms (concept/domain nodes)?
+  const glossaryCount = useMemo(() => {
+    const names = new Set<string>();
+    for (const n of graph?.nodes ?? []) {
+      if (n.type === "concept" || n.type === "domain") names.add(n.name.toLowerCase());
+    }
+    for (const n of domainGraph?.nodes ?? []) {
+      if (n.type === "concept" || n.type === "domain") names.add(n.name.toLowerCase());
+    }
+    return names.size;
+  }, [graph, domainGraph]);
 
   if (!graph) {
     return (
@@ -59,6 +77,12 @@ export default function ProjectOverview() {
       {/* Project name */}
       <h2 className="font-heading text-2xl text-text-primary mb-1">{project.name}</h2>
       <p className="text-sm text-text-secondary leading-relaxed mb-6">{project.description}</p>
+
+      {/* Item 161: dismissible onboarding checklist. */}
+      <OnboardingChecklist />
+
+      {/* Item 158: "You've explored X%" coverage ring. */}
+      <CoverageRing />
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 gap-3 mb-6">
@@ -217,6 +241,18 @@ export default function ProjectOverview() {
           {t.common.startGuidedTour}
         </button>
       )}
+
+      {/* Item 165: project glossary launcher. */}
+      {glossaryCount > 0 && (
+        <button
+          onClick={() => setGlossaryOpen(true)}
+          className="w-full mt-2 bg-elevated border border-border-subtle text-text-secondary hover:text-text-primary hover:border-accent/30 text-sm font-medium py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+        >
+          <span aria-hidden>📖</span> Glossary
+          <span className="text-text-muted font-mono text-xs">({glossaryCount})</span>
+        </button>
+      )}
+      {glossaryOpen && <GlossaryPanel onClose={() => setGlossaryOpen(false)} />}
     </div>
   );
 }

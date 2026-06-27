@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback, lazy, Suspense } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef, lazy, Suspense } from "react";
 import { validateGraph } from "@understand-anything/core/schema";
 import type { GraphIssue } from "@understand-anything/core/schema";
 import { useDashboardStore, setWorkspaceToken } from "./store";
@@ -19,6 +19,9 @@ import WarningBanner from "./components/WarningBanner";
 import TokenGate from "./components/TokenGate";
 import BookmarksPanel from "./components/BookmarksPanel";
 import JumpActions from "./components/JumpActions";
+import StartHereSpotlight from "./components/StartHereSpotlight";
+import ResumeBanner from "./components/ResumeBanner";
+import LanguageAxisToggle from "./components/LanguageAxisToggle";
 import MobileLayout from "./components/MobileLayout";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
@@ -158,6 +161,13 @@ function Dashboard({ accessToken }: { accessToken: string }) {
         const result = validateGraph(data);
         if (result.success && result.data) {
           setGraph(result.data);
+          // Items 131-165: hydrate per-project onboarding/learning state from
+          // localStorage (workspace whitelist drops these keys, so they live
+          // client-side). Keyed by project name + git hash for stability.
+          const proj = result.data.project;
+          useDashboardStore
+            .getState()
+            .loadLearning(`${proj.name}@${proj.gitCommitHash || ""}`);
           setGraphIssues(result.issues);
           if ((data as Record<string, unknown>).kind === "knowledge") {
             useDashboardStore.getState().setViewMode("knowledge");
@@ -284,6 +294,7 @@ function DashboardContent({
   }, []);
   const viewMode = useDashboardStore((s) => s.viewMode);
   const setViewMode = useDashboardStore((s) => s.setViewMode);
+  const onboardingGoal = useDashboardStore((s) => s.learning.onboardingGoal);
   const isKnowledgeGraph = useDashboardStore((s) => s.isKnowledgeGraph);
   const domainGraph = useDashboardStore((s) => s.domainGraph);
   const layoutIssues = useDashboardStore((s) => s.layoutIssues);
@@ -297,6 +308,38 @@ function DashboardContent({
   useEffect(() => {
     if (selectedNodeId) setSidebarTab("info");
   }, [selectedNodeId]);
+
+  // Item 132: route the initial view from the "Pick your goal" card. Fires only
+  // when the goal actually changes (the overlay sets it on dismiss).
+  const lastRoutedGoal = useRef<string | null>(null);
+  useEffect(() => {
+    if (!graph || !onboardingGoal) return;
+    if (lastRoutedGoal.current === onboardingGoal) return;
+    lastRoutedGoal.current = onboardingGoal;
+    const store = useDashboardStore.getState();
+    switch (onboardingGoal) {
+      case "architecture":
+        store.setViewMode("structural", { keepSelection: false });
+        store.navigateToOverview();
+        break;
+      case "find":
+        store.setViewMode("structural", { keepSelection: false });
+        // Defer so the input is mounted before we focus it.
+        setTimeout(() => {
+          document
+            .querySelector<HTMLInputElement>('[data-testid="search-input"]')
+            ?.focus();
+        }, 120);
+        break;
+      case "role":
+        store.startTour();
+        break;
+      case "exploring":
+        store.setViewMode("structural", { keepSelection: false });
+        store.selectNode(null);
+        break;
+    }
+  }, [graph, onboardingGoal]);
 
   // Define keyboard shortcuts
   const shortcuts = useMemo<KeyboardShortcut[]>(
@@ -504,6 +547,8 @@ function DashboardContent({
           </h1>
           <div className="w-px h-5 bg-border-subtle hidden sm:block" />
           <PersonaSelector />
+          {/* Item 149: "New to <Language>?" axis (self-hides if no lessons). */}
+          <LanguageAxisToggle />
           {graph && !isKnowledgeGraph && (
             <>
               <div className="w-px h-5 bg-border-subtle" />
@@ -769,6 +814,9 @@ function DashboardContent({
       {/* Search */}
       <SearchBar />
 
+      {/* Item 136: "Resume where you left off" tour banner. */}
+      <ResumeBanner />
+
       {/* Validation warning banner */}
       {allIssues.length > 0 && !loadError && (
         <WarningBanner issues={allIssues} />
@@ -799,6 +847,8 @@ function DashboardContent({
           <div className="absolute top-3 right-3 text-sm text-text-muted/60 pointer-events-none select-none">
             {t.common.pressKeyboard}
           </div>
+          {/* Item 133: "Start here" entry-point spotlight (structural view only). */}
+          <StartHereSpotlight />
         </div>
 
         {/* Right sidebar — telescopes at narrower widths */}

@@ -9,6 +9,15 @@ import type {
 } from "@understand-anything/core/types";
 import type { ReactFlowInstance } from "@xyflow/react";
 import type { ColorDimension } from "./components/traceColor";
+import {
+  type OnboardingGoal,
+  type LearningState,
+  EMPTY_LEARNING,
+  loadLearning,
+  saveLearning,
+} from "./utils/learningPersist";
+
+export type { OnboardingGoal };
 
 export type Persona = "non-technical" | "junior" | "experienced";
 /** Wave-4 feature 37b: answer-detail level for claude -p explanations. */
@@ -204,6 +213,9 @@ function genId(prefix: string): string {
 let workspaceToken: string | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** Project key used to namespace localStorage learning state. */
+let learningProjectKey = "default";
+
 /** Set the access token used for workspace GET/POST. Called once on load. */
 export function setWorkspaceToken(token: string) {
   workspaceToken = token;
@@ -334,6 +346,8 @@ interface DashboardStore {
   hasActiveFilters: () => boolean;
 
   startTour: () => void;
+  /** Item 136: resume a previously-in-progress tour at the persisted step. */
+  resumeTour: () => void;
   stopTour: () => void;
   setTourStep: (step: number) => void;
   nextTourStep: () => void;
@@ -453,6 +467,26 @@ interface DashboardStore {
   saveTour: (name: string, hopIds: string[]) => void;
   removeTour: (id: string) => void;
 
+  // ---- Onboarding / teaching state (items 131-165) ----------------------
+  //
+  // NOTE: all of this is persisted to localStorage (not workspace.json) — the
+  // server whitelist drops unknown keys, so onboarding goal / tour progress /
+  // coverage / checklist / language-axis live client-side, keyed per project.
+  learning: LearningState;
+  learningLoaded: boolean;
+  /** Hydrate learning state for a project key (called once the graph loads). */
+  loadLearning: (projectKey: string) => void;
+  /** Item 132: route the initial view from the "Pick your goal" card. */
+  setOnboardingGoal: (goal: OnboardingGoal | null) => void;
+  /** Item 149: toggle the "New to Go?" language axis (separate from persona). */
+  toggleLanguageAxis: () => void;
+  /** Item 158: mark a node visited (selected / explained / traced). */
+  markVisited: (nodeId: string) => void;
+  /** Item 161: dismiss the onboarding checklist card. */
+  dismissChecklist: () => void;
+  /** Item 161: explicitly flag a checklist milestone (domain-flow read). */
+  markChecklist: (key: "tookTour" | "didTrace" | "readDomainFlow") => void;
+
   // ---- Wave-4: converse-with-Claude state -------------------------------
   /** Feature 38: persisted free-text trace rules (workspace.rules). */
   setRules: (rules: string) => void;
@@ -529,6 +563,68 @@ interface DashboardStore {
   layoutIssues: GraphIssue[];
   appendLayoutIssues: (issues: GraphIssue[]) => void;
   clearLayoutIssues: () => void;
+}
+
+/**
+ * Items 140/141/147: tour steps may optionally carry a per-step `view`
+ * (structural / domain / trace), a `traceNodeId` (Trace-this target), and a
+ * `personas` allow-list. These are NOT in the core TourStep type yet, so we
+ * read them off an extended view at runtime (and fall back to heuristics).
+ */
+export interface ExtendedTourStep extends TourStep {
+  view?: ViewMode;
+  traceNodeId?: string;
+  personas?: Persona[];
+}
+
+/** Item 140: which view a step wants. Defaults to structural when absent. */
+export function tourStepView(step: TourStep): ViewMode {
+  return (step as ExtendedTourStep).view ?? "structural";
+}
+
+/**
+ * Item 147: persona-adapted tour depth. A step is shown when it either declares
+ * the active persona in its `personas` list, or (heuristic, when no list is
+ * given) when its depth fits the persona:
+ *   - non-technical: only the first half of the tour + domain-flavoured steps
+ *   - junior:        every step (full walkthrough)
+ *   - experienced:   condensed — every other step after the first two
+ */
+export function tourStepVisibleForPersona(
+  step: TourStep,
+  index: number,
+  total: number,
+  persona: Persona,
+): boolean {
+  const declared = (step as ExtendedTourStep).personas;
+  if (declared && declared.length > 0) return declared.includes(persona);
+  if (persona === "junior") return true;
+  if (persona === "non-technical") {
+    const isDomain = tourStepView(step) === "domain";
+    return isDomain || index < Math.ceil(total / 2);
+  }
+  // experienced — keep the first two, then every other step (condensed).
+  return index < 2 || index % 2 === 0;
+}
+
+/** Item 137/136: persist the live tour position + completion into localStorage. */
+function persistTourProgress(
+  state: DashboardStore,
+  step: number,
+  inProgress: boolean,
+): Partial<DashboardStore> {
+  const completed = new Set(state.learning.completedSteps);
+  // Mark every step up to (but not including) the current one as completed.
+  for (let i = 0; i < step; i++) completed.add(i);
+  const learning: LearningState = {
+    ...state.learning,
+    tourStep: step,
+    tourInProgress: inProgress,
+    completedSteps: Array.from(completed).sort((a, b) => a - b),
+    tookTour: state.learning.tookTour || inProgress,
+  };
+  saveLearning(learningProjectKey, learning);
+  return { learning };
 }
 
 function getSortedTour(graph: KnowledgeGraph): TourStep[] {
@@ -792,6 +888,8 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     } else {
       set({ selectedNodeId: nodeId });
     }
+    // Item 158: count a selected node toward exploration coverage.
+    if (nodeId) get().markVisited(nodeId);
   },
 
   navigateToNode: (nodeId) => {
@@ -990,7 +1088,8 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   },
 
   startTour: () => {
-    const { graph, nodeIdToLayerId, activeLayerId } = get();
+    const state = get();
+    const { graph, nodeIdToLayerId, activeLayerId } = state;
     if (!graph || !graph.tour || graph.tour.length === 0) return;
     const sorted = getSortedTour(graph);
     const layerNav = navigateTourToLayer(nodeIdToLayerId, sorted[0].nodeIds);
@@ -999,20 +1098,44 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       currentTourStep: 0,
       tourHighlightedNodeIds: sorted[0].nodeIds,
       selectedNodeId: null,
+      // Item 140: a step may want a non-structural view; default structural.
+      viewMode: tourStepView(sorted[0]),
       ...layerNav,
       ...layerResetIfChanged(layerNav, activeLayerId),
+      ...persistTourProgress(state, 0, true),
+    });
+  },
+
+  resumeTour: () => {
+    const state = get();
+    const { graph, nodeIdToLayerId, activeLayerId } = state;
+    if (!graph || !graph.tour || graph.tour.length === 0) return;
+    const sorted = getSortedTour(graph);
+    const step = Math.min(Math.max(0, state.learning.tourStep), sorted.length - 1);
+    const layerNav = navigateTourToLayer(nodeIdToLayerId, sorted[step].nodeIds);
+    set({
+      tourActive: true,
+      currentTourStep: step,
+      tourHighlightedNodeIds: sorted[step].nodeIds,
+      selectedNodeId: null,
+      viewMode: tourStepView(sorted[step]),
+      ...layerNav,
+      ...layerResetIfChanged(layerNav, activeLayerId),
+      ...persistTourProgress(state, step, true),
     });
   },
 
   stopTour: () =>
-    set({
+    set((state) => ({
       tourActive: false,
       currentTourStep: 0,
       tourHighlightedNodeIds: [],
-    }),
+      ...persistTourProgress(state, state.currentTourStep, false),
+    })),
 
   setTourStep: (step) => {
-    const { graph, nodeIdToLayerId, activeLayerId } = get();
+    const state = get();
+    const { graph, nodeIdToLayerId, activeLayerId } = state;
     if (!graph || !graph.tour || graph.tour.length === 0) return;
     const sorted = getSortedTour(graph);
     if (step < 0 || step >= sorted.length) return;
@@ -1020,13 +1143,16 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
     set({
       currentTourStep: step,
       tourHighlightedNodeIds: sorted[step].nodeIds,
+      viewMode: tourStepView(sorted[step]),
       ...layerNav,
       ...layerResetIfChanged(layerNav, activeLayerId),
+      ...persistTourProgress(state, step, true),
     });
   },
 
   nextTourStep: () => {
-    const { graph, currentTourStep, nodeIdToLayerId, activeLayerId } = get();
+    const state = get();
+    const { graph, currentTourStep, nodeIdToLayerId, activeLayerId } = state;
     if (!graph || !graph.tour || graph.tour.length === 0) return;
     const sorted = getSortedTour(graph);
     if (currentTourStep < sorted.length - 1) {
@@ -1035,14 +1161,17 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       set({
         currentTourStep: next,
         tourHighlightedNodeIds: sorted[next].nodeIds,
+        viewMode: tourStepView(sorted[next]),
         ...layerNav,
         ...layerResetIfChanged(layerNav, activeLayerId),
+        ...persistTourProgress(state, next, true),
       });
     }
   },
 
   prevTourStep: () => {
-    const { graph, currentTourStep, nodeIdToLayerId, activeLayerId } = get();
+    const state = get();
+    const { graph, currentTourStep, nodeIdToLayerId, activeLayerId } = state;
     if (!graph || !graph.tour || graph.tour.length === 0) return;
     if (currentTourStep > 0) {
       const sorted = getSortedTour(graph);
@@ -1051,8 +1180,10 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       set({
         currentTourStep: prev,
         tourHighlightedNodeIds: sorted[prev].nodeIds,
+        viewMode: tourStepView(sorted[prev]),
         ...layerNav,
         ...layerResetIfChanged(layerNav, activeLayerId),
+        ...persistTourProgress(state, prev, true),
       });
     }
   },
@@ -1166,7 +1297,7 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
   symbolPaletteOpen: false,
   toggleSymbolPalette: () => set((s) => ({ symbolPaletteOpen: !s.symbolPaletteOpen })),
   setSymbolPaletteOpen: (open) => set({ symbolPaletteOpen: open }),
-  startTraceAt: (id) =>
+  startTraceAt: (id) => {
     set({
       traceRoot: id,
       traceStack: [id],
@@ -1174,7 +1305,11 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       viewMode: "trace",
       selectedNodeId: id,
       symbolPaletteOpen: false,
-    }),
+    });
+    // Items 158/161: a trace counts toward coverage + checks the "traced" box.
+    get().markVisited(id);
+    get().markChecklist("didTrace");
+  },
 
   // ---- Workspace persistence -------------------------------------------
   workspace: EMPTY_WORKSPACE,
@@ -1266,6 +1401,55 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
       const workspace = { ...state.workspace, tours };
       schedulePersist(workspace);
       return { workspace };
+    }),
+
+  // ---- Onboarding / teaching state (items 131-165) ----------------------
+  learning: { ...EMPTY_LEARNING },
+  learningLoaded: false,
+
+  loadLearning: (projectKey) => {
+    learningProjectKey = projectKey || "default";
+    set({ learning: loadLearning(learningProjectKey), learningLoaded: true });
+  },
+
+  setOnboardingGoal: (goal) =>
+    set((s) => {
+      const learning = { ...s.learning, onboardingGoal: goal };
+      saveLearning(learningProjectKey, learning);
+      return { learning };
+    }),
+
+  toggleLanguageAxis: () =>
+    set((s) => {
+      const learning = { ...s.learning, languageAxis: !s.learning.languageAxis };
+      saveLearning(learningProjectKey, learning);
+      return { learning };
+    }),
+
+  markVisited: (nodeId) =>
+    set((s) => {
+      if (!nodeId || s.learning.visitedNodeIds.includes(nodeId)) return {};
+      const learning = {
+        ...s.learning,
+        visitedNodeIds: [...s.learning.visitedNodeIds, nodeId],
+      };
+      saveLearning(learningProjectKey, learning);
+      return { learning };
+    }),
+
+  dismissChecklist: () =>
+    set((s) => {
+      const learning = { ...s.learning, checklistDismissed: true };
+      saveLearning(learningProjectKey, learning);
+      return { learning };
+    }),
+
+  markChecklist: (key) =>
+    set((s) => {
+      if (s.learning[key]) return {};
+      const learning = { ...s.learning, [key]: true };
+      saveLearning(learningProjectKey, learning);
+      return { learning };
     }),
 
   // ---- Wave-4: converse-with-Claude state -------------------------------
@@ -1385,13 +1569,16 @@ export const useDashboardStore = create<DashboardStore>()((set, get) => ({
 
   // ---- Domain business-flow actions (91/93/99/113/110/106) --------------
   expandedDomainFlows: new Set<string>(),
-  toggleDomainFlowsExpanded: (domainId) =>
+  toggleDomainFlowsExpanded: (domainId) => {
     set((s) => {
       const next = new Set(s.expandedDomainFlows);
       if (next.has(domainId)) next.delete(domainId);
       else next.add(domainId);
       return { expandedDomainFlows: next };
-    }),
+    });
+    // Item 161: opening a domain flow checks the "read a domain flow" box.
+    get().markChecklist("readDomainFlow");
+  },
   focusedFlowId: null,
   setFocusedFlow: (flowId) => set({ focusedFlowId: flowId }),
   domainStorylineMode: false,
