@@ -7,14 +7,12 @@ import GraphView from "./components/GraphView";
 import DomainGraphView from "./components/DomainGraphView";
 import KnowledgeGraphView from "./components/KnowledgeGraphView";
 import SearchBar from "./components/SearchBar";
-import NodeInfo from "./components/NodeInfo";
 import LayerLegend from "./components/LayerLegend";
 import DiffToggle from "./components/DiffToggle";
 import FilterPanel from "./components/FilterPanel";
 import ExportMenu from "./components/ExportMenu";
 import PersonaSelector from "./components/PersonaSelector";
-import ProjectOverview from "./components/ProjectOverview";
-import FileExplorer from "./components/FileExplorer";
+import SidebarInspector from "./components/SidebarInspector";
 import WarningBanner from "./components/WarningBanner";
 import TokenGate from "./components/TokenGate";
 import BookmarksPanel from "./components/BookmarksPanel";
@@ -36,7 +34,6 @@ import { I18nProvider, useI18n } from "./contexts/I18nContext.tsx";
 // Lazy-load heavy / optional components so they ship in separate chunks.
 const CodeViewer = lazy(() => import("./components/CodeViewer"));
 const TraceView = lazy(() => import("./components/TraceView"));
-const LearnPanel = lazy(() => import("./components/LearnPanel"));
 const PathFinderModal = lazy(() => import("./components/PathFinderModal"));
 const KeyboardShortcutsHelp = lazy(
   () => import("./components/KeyboardShortcutsHelp"),
@@ -48,7 +45,36 @@ const SettingsModal = lazy(() => import("./components/SettingsModal"));
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
 const SESSION_TOKEN_KEY = "understand-anything-token";
 const ONBOARDING_DISMISSED_KEY = "ua-onboarding-dismissed-v1";
-type SidebarTab = "info" | "files";
+
+// Layout ergonomics: resizable left sidebar (drag splitter) persisted to
+// localStorage (the server workspace whitelist drops unknown keys).
+const SIDEBAR_WIDTH_KEY = "ua-sidebar-width-v1";
+const SIDEBAR_MIN_WIDTH = 240;
+const SIDEBAR_MAX_WIDTH = 640;
+const SIDEBAR_DEFAULT_WIDTH = 360;
+
+function readSidebarWidth(): number {
+  if (typeof window === "undefined") return SIDEBAR_DEFAULT_WIDTH;
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    const n = raw ? parseInt(raw, 10) : NaN;
+    if (Number.isFinite(n)) {
+      return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, n));
+    }
+  } catch {
+    /* ignore */
+  }
+  return SIDEBAR_DEFAULT_WIDTH;
+}
+
+function persistSidebarWidth(width: number): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(width)));
+  } catch {
+    /* ignore */
+  }
+}
 
 function shouldShowOnboarding(): boolean {
   if (typeof window === "undefined") return false;
@@ -262,9 +288,6 @@ function DashboardContent({
   graphIssues: GraphIssue[];
 }) {
   const graph = useDashboardStore((s) => s.graph);
-  const selectedNodeId = useDashboardStore((s) => s.selectedNodeId);
-  const tourActive = useDashboardStore((s) => s.tourActive);
-  const persona = useDashboardStore((s) => s.persona);
   const codeViewerOpen = useDashboardStore((s) => s.codeViewerOpen);
   const codeViewerExpanded = useDashboardStore((s) => s.codeViewerExpanded);
   const expandCodeViewer = useDashboardStore((s) => s.expandCodeViewer);
@@ -287,7 +310,8 @@ function DashboardContent({
   const complexityHeat = useDashboardStore((s) => s.complexityHeat);
   const toggleComplexityHeat = useDashboardStore((s) => s.toggleComplexityHeat);
   const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("info");
+  const [sidebarWidth, setSidebarWidth] = useState<number>(readSidebarWidth);
+  const resizingRef = useRef(false);
   const [showOnboarding, setShowOnboarding] = useState(shouldShowOnboarding);
   const dismissOnboarding = useCallback((remember: boolean) => {
     if (remember && typeof window !== "undefined") {
@@ -312,9 +336,40 @@ function DashboardContent({
     [graphIssues, layoutIssues],
   );
 
-  useEffect(() => {
-    if (selectedNodeId) setSidebarTab("info");
-  }, [selectedNodeId]);
+  // Resizable sidebar drag handlers (pointer-based; clamped + persisted).
+  const startSidebarResize = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    const onMove = (ev: PointerEvent) => {
+      if (!resizingRef.current) return;
+      // Sidebar is on the right edge — width grows as the pointer moves left.
+      const next = Math.min(
+        SIDEBAR_MAX_WIDTH,
+        Math.max(SIDEBAR_MIN_WIDTH, window.innerWidth - ev.clientX),
+      );
+      setSidebarWidth(next);
+    };
+    const onUp = () => {
+      resizingRef.current = false;
+      setSidebarWidth((w) => {
+        persistSidebarWidth(w);
+        return w;
+      });
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, []);
+
+  const resetSidebarWidth = useCallback(() => {
+    setSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
+    persistSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
+  }, []);
 
   // Item 132: route the initial view from the "Pick your goal" card. Fires only
   // when the goal actually changes (the overlay sets it on dismiss).
@@ -540,46 +595,6 @@ function DashboardContent({
 
   // Register keyboard shortcuts
   useKeyboardShortcuts(shortcuts);
-
-  // Determine sidebar content
-  // NodeInfo always takes priority when a node is selected.
-  // Learn mode adds LearnPanel below it; otherwise ProjectOverview shows when idle.
-  const isLearnMode = tourActive || persona === "junior";
-  const infoSidebarContent = (
-    <>
-      {selectedNodeId && <NodeInfo />}
-      {isLearnMode && (
-        <Suspense fallback={null}>
-          <LearnPanel />
-        </Suspense>
-      )}
-      {!selectedNodeId && !isLearnMode && <ProjectOverview />}
-    </>
-  );
-
-  const sidebarContent = (
-    <div className="h-full flex flex-col min-h-0">
-      <div className="flex items-center gap-1 p-2 border-b border-border-subtle bg-surface shrink-0">
-        {(["info", "files"] as const).map((tab) => (
-          <button
-            key={tab}
-            type="button"
-            onClick={() => setSidebarTab(tab)}
-            className={`flex-1 px-3 py-1.5 rounded-md text-xs font-semibold uppercase tracking-wider transition-colors ${
-              sidebarTab === tab
-                ? "bg-accent/15 text-accent"
-                : "text-text-muted hover:text-text-primary hover:bg-elevated"
-            }`}
-          >
-            {tab === "info" ? t.sidebar.info : t.sidebar.files}
-          </button>
-        ))}
-      </div>
-      <div className="flex-1 min-h-0 overflow-auto">
-        {sidebarTab === "files" ? <FileExplorer /> : infoSidebarContent}
-      </div>
-    </div>
-  );
 
   if (isMobile) {
     return (
@@ -939,9 +954,23 @@ function DashboardContent({
           <StartHereSpotlight />
         </div>
 
-        {/* Right sidebar — telescopes at narrower widths */}
-        <aside className="w-[260px] md:w-[300px] lg:w-[360px] shrink-0 bg-surface border-l border-border-subtle overflow-auto">
-          {sidebarContent}
+        {/* Drag splitter — resize the sidebar; double-click resets to default. */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          onPointerDown={startSidebarResize}
+          onDoubleClick={resetSidebarWidth}
+          className="w-1.5 shrink-0 cursor-col-resize bg-border-subtle/40 hover:bg-accent/40 active:bg-accent/60 transition-colors"
+          title="Drag to resize · double-click to reset"
+        />
+
+        {/* Right sidebar — resizable (drag the splitter on its left edge) */}
+        <aside
+          className="shrink-0 bg-surface border-l border-border-subtle overflow-hidden"
+          style={{ width: sidebarWidth }}
+        >
+          <SidebarInspector />
         </aside>
 
         {/* Code viewer slide-up overlay (collapsed state) */}

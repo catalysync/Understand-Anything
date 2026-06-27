@@ -7,6 +7,7 @@ import { useExplain, fetchGhost, resolveCitation } from "./useCodeAssist";
 import type { ExplainState } from "./useCodeAssist";
 import ExplainPanel from "./ExplainPanel";
 import TraceControls from "./TraceControls";
+import Collapsible from "./Collapsible";
 import {
   buildTrace,
   callTargets,
@@ -1887,13 +1888,21 @@ function ConverseBar({
 }) {
   const [rulesOpen, setRulesOpen] = useState(false);
   return (
-    <div
-      data-testid="converse-bar"
-      className="rounded border border-border-subtle/60 bg-surface/40 px-2.5 py-2 space-y-2"
+    <Collapsible
+      storageKey="ua-converse-bar-open-v1"
+      label="Claude"
+      testId="converse-bar"
+      right={
+        <span className="text-[9px] uppercase tracking-wider text-text-muted/60 truncate">
+          {level}
+          {goDocs ? " · @go-docs" : ""}
+          {rules.trim() ? " · rules" : ""}
+          {chips.length > 0 ? ` · ${chips.length} @` : ""}
+        </span>
+      }
     >
+      <div className="space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-[9px] uppercase tracking-wider text-text-muted">Claude</span>
-
         {/* Walk-me-through */}
         <button
           type="button"
@@ -2008,7 +2017,8 @@ function ConverseBar({
 
       {/* Walk-through panel */}
       {walkState !== "idle" && <div className="pt-1">{walkPanel}</div>}
-    </div>
+      </div>
+    </Collapsible>
   );
 }
 

@@ -2,8 +2,9 @@
 // toggle (callees/callers), depth slider, layout switch, fold-by-name input,
 // blackbox/mute packages panel, critical-path toggle, and the "Path to…"
 // mode. All state lives in the store; this component just renders + dispatches.
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useDashboardStore } from "../store";
+import Collapsible from "./Collapsible";
 import { packageLabel } from "./traceGraph";
 import { COLOR_DIMENSIONS, type ColorDimension } from "./traceColor";
 import type { GraphNode } from "@understand-anything/core/types";
@@ -12,6 +13,19 @@ const btnBase =
   "text-[10px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded border transition-colors";
 const btnIdle = "border-border-subtle text-text-muted hover:text-text-primary hover:border-border-medium";
 const btnActive = "border-accent/60 text-accent bg-accent/10";
+
+/** A labeled sub-section so the wall of controls reads as View · Filter · Highlight · Analyze. */
+function Section({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span className="text-[9px] font-semibold uppercase tracking-[0.12em] text-text-muted/70 select-none">
+        {label}
+      </span>
+      <div className="w-px self-stretch bg-border-subtle/60" />
+      {children}
+    </div>
+  );
+}
 
 export default function TraceControls({
   packagesPresent,
@@ -53,8 +67,21 @@ export default function TraceControls({
   }, [pathQuery, searchResults]);
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2 flex-wrap">
+    <Collapsible
+      storageKey="ua-trace-controls-open-v1"
+      label="Controls"
+      testId="trace-controls"
+      right={
+        <span className="text-[9px] uppercase tracking-wider text-text-muted/60 truncate">
+          {direction} · depth {depth} · {layout}
+          {mutedCount > 0 ? ` · ${mutedCount} muted` : ""}
+          {pathTarget ? " · path" : ""}
+        </span>
+      }
+    >
+      <div className="flex flex-col gap-2.5">
+      {/* ── View ─────────────────────────────────────────── */}
+      <Section label="View">
         {/* Direction toggle */}
         <div className="flex rounded border border-border-subtle overflow-hidden">
           <button
@@ -129,7 +156,10 @@ export default function TraceControls({
             ))}
           </select>
         </div>
+      </Section>
 
+      {/* ── Analyze ──────────────────────────────────────── */}
+      <Section label="Analyze">
         {/* Critical path */}
         <button
           type="button"
@@ -138,16 +168,6 @@ export default function TraceControls({
           title="Highlight the longest call chain from the root"
         >
           ◆ Critical path
-        </button>
-
-        {/* Blackbox / mute packages */}
-        <button
-          type="button"
-          onClick={() => setMuteOpen((v) => !v)}
-          className={`${btnBase} ${mutedCount > 0 ? btnActive : btnIdle}`}
-          title="Mute / blackbox packages"
-        >
-          ⬚ Blackbox{mutedCount > 0 ? ` (${mutedCount})` : ""}
         </button>
 
         {/* Path-to mode */}
@@ -169,11 +189,22 @@ export default function TraceControls({
             ✕ Clear path
           </button>
         )}
-      </div>
+      </Section>
 
-      {/* Fold-by-name input + chips */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-[10px] uppercase tracking-wider text-text-muted">Fold</span>
+      {/* ── Filter ───────────────────────────────────────── */}
+      <Section label="Filter">
+        {/* Blackbox / mute packages */}
+        <button
+          type="button"
+          onClick={() => setMuteOpen((v) => !v)}
+          className={`${btnBase} ${mutedCount > 0 ? btnActive : btnIdle}`}
+          title="Mute / blackbox packages"
+        >
+          ⬚ Blackbox{mutedCount > 0 ? ` (${mutedCount})` : ""}
+        </button>
+
+        {/* Fold-by-name input + chips */}
+        <span className="text-[10px] uppercase tracking-wider text-text-muted ml-1">Fold</span>
         <input
           type="text"
           value={foldDraft}
@@ -198,7 +229,7 @@ export default function TraceControls({
             {p} ✕
           </button>
         ))}
-      </div>
+      </Section>
 
       {/* Blackbox panel */}
       {muteOpen && (
@@ -268,6 +299,7 @@ export default function TraceControls({
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </Collapsible>
   );
 }
